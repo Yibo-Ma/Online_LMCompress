@@ -1,0 +1,15 @@
+# Core
+torch
+numpy
+transformers
+peft
+constriction          # range coder backend
+tqdm
+
+# Modality I/O
+pillow                # image (PIL)
+pydub                 # audio chunking
+soundfile             # audio decoding (no ffmpeg needed)
+pandas                # parquet audio datasets
+datasets              # HF dataset loaders + downloader
+samplings             # required by bgpt/utils.py
