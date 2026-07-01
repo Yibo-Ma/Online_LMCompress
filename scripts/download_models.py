@@ -5,13 +5,18 @@ Run from the repo root.
 
 Examples
 --------
-    python scripts/download_models.py --model qwen2.5-0.5b
-    python scripts/download_models.py --model qwen2.5-0.5b qwen3-1.7b bgpt
+    python scripts/download_models.py --model qwen3-1.7b
+    python scripts/download_models.py --model qwen2.5-0.5b qwen2.5-7b qwen3-1.7b qwen3-4b qwen3-8b bgpt
     python scripts/download_models.py --all
     python scripts/download_models.py --list
 
-Uses hf-mirror.com by default (``--no-mirror`` / ``--hf-endpoint`` to change) and
-``huggingface_hub`` resumable downloads, so an interrupted pull continues.
+Endpoint handling
+-----------------
+By default it tries **hf-mirror.com first and falls back to huggingface.co** (so it
+works whether you are behind the Great Firewall *or* on a network where the mirror
+only redirects). Force one with ``--no-mirror`` (hf.co only) or ``--hf-endpoint URL``.
+Downloads are resumable, so an interrupted pull continues. If both endpoints fail
+(fully offline / blocked), use ModelScope — see the tip printed on failure.
 """
 from __future__ import annotations
 
@@ -21,37 +26,71 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _common import CKPT_ROOT, setup_hf_endpoint  # noqa: E402
-import catalog  # noqa: E402
+from _common import CKPT_ROOT, DEFAULT_HF_MIRROR  # noqa: E402
+
+HF_CO = "https://huggingface.co"
+
+# Model registry (this script owns it, like download_text/image/audio own theirs).
+MODELS = {
+    "qwen2.5-0.5b": dict(source="hf_repo", repo="Qwen/Qwen2.5-0.5B",    dir="Qwen2.5-0.5B"),
+    "qwen2.5-7b":   dict(source="hf_repo", repo="Qwen/Qwen2.5-7B",      dir="Qwen2.5-7B"),
+    "qwen3-1.7b":   dict(source="hf_repo", repo="Qwen/Qwen3-1.7B-Base", dir="Qwen3-1.7B-Base"),
+    "qwen3-4b":     dict(source="hf_repo", repo="Qwen/Qwen3-4B-Base",   dir="Qwen3-4B-Base"),
+    "qwen3-8b":     dict(source="hf_repo", repo="Qwen/Qwen3-8B-Base",   dir="Qwen3-8B-Base"),
+    "bgpt": dict(
+        source="hf_files", repo="sander-wood/bgpt", dir="bgpt",
+        files=["weights-image.pth", "weights-audio.pth", "weights-text.pth"],
+        note="if your team uses custom bGPT checkpoints, drop them in checkpoints/bgpt/"),
+}
 
 
-def download_repo(name: str, spec: dict) -> None:
+def _endpoints(args) -> list[str]:
+    if args.hf_endpoint:
+        return [args.hf_endpoint]
+    if args.no_mirror:
+        return [HF_CO]
+    return [DEFAULT_HF_MIRROR, HF_CO]        # mirror first, then fall back to hf.co
+
+
+def download_repo(spec: dict, endpoint: str) -> None:
     from huggingface_hub import snapshot_download
-    dest = CKPT_ROOT / spec["dir"]
-    print(f"  [{name}] {spec['repo']} -> {dest}")
     snapshot_download(
-        repo_id=spec["repo"],
-        local_dir=str(dest),
-        # skip the duplicate consolidated file when sharded weights exist
+        repo_id=spec["repo"], local_dir=str(CKPT_ROOT / spec["dir"]),
+        endpoint=endpoint,
+        # skip the duplicate consolidated weight when sharded files exist
         ignore_patterns=["*.pth", "*.msgpack", "*.h5", "original/*"],
     )
-    print(f"  [{name}] done")
 
 
-def download_files(name: str, spec: dict) -> None:
+def download_files(spec: dict, endpoint: str) -> None:
     from huggingface_hub import hf_hub_download
     dest = CKPT_ROOT / spec["dir"]
     dest.mkdir(parents=True, exist_ok=True)
     for fname in spec["files"]:
-        print(f"  [{name}] {spec['repo']}:{fname} -> {dest}")
+        hf_hub_download(repo_id=spec["repo"], filename=fname,
+                        local_dir=str(dest), endpoint=endpoint)
+
+
+def fetch_model(name: str, spec: dict, endpoints: list[str]) -> bool:
+    fn = download_repo if spec["source"] == "hf_repo" else download_files
+    last = None
+    for ep in endpoints:
         try:
-            hf_hub_download(repo_id=spec["repo"], filename=fname,
-                            local_dir=str(dest))
+            print(f"  [{name}] {spec['repo']} via {ep} -> checkpoints/{spec['dir']}")
+            fn(spec, ep)
+            print(f"  [{name}] done")
+            return True
         except Exception as e:
-            print(f"  [{name}] {fname} FAILED: {type(e).__name__}: {e}")
-            if spec.get("note"):
-                print(f"        {spec['note']}")
-    print(f"  [{name}] done")
+            last = e
+            tail = endpoints[-1]
+            if ep != tail:
+                print(f"  [{name}] {ep} failed ({type(e).__name__}); falling back ...")
+    print(f"  [{name}] FAILED on all endpoints: {type(last).__name__}: {str(last)[:120]}")
+    print(f"        China tip: pip install modelscope && "
+          f"modelscope download --model {spec['repo']} --local_dir checkpoints/{spec['dir']}")
+    if spec.get("note"):
+        print(f"        {spec['note']}")
+    return False
 
 
 def main() -> int:
@@ -63,28 +102,29 @@ def main() -> int:
     p.add_argument("--model", nargs="*", help="model key(s) from the catalog")
     p.add_argument("--all", action="store_true", help="download every model")
     p.add_argument("--list", action="store_true")
-    p.add_argument("--no-mirror", action="store_true")
-    p.add_argument("--hf-endpoint", default=None)
+    p.add_argument("--no-mirror", action="store_true", help="use huggingface.co only")
+    p.add_argument("--hf-endpoint", default=None, help="force a single endpoint URL")
     args = p.parse_args()
 
     if args.list:
-        for k, s in catalog.MODELS.items():
+        for k, s in MODELS.items():
             print(f"  {k:<14} {s['repo']:<26} -> checkpoints/{s['dir']}")
         return 0
 
-    ep = setup_hf_endpoint(use_mirror=not args.no_mirror, endpoint=args.hf_endpoint)
-    print(f"HF endpoint: {ep}")
+    endpoints = _endpoints(args)
+    print(f"endpoints (in order): {endpoints}")
 
-    keys = list(catalog.MODELS) if args.all else (args.model or [])
+    keys = list(MODELS) if args.all else (args.model or [])
     if not keys:
         p.error("specify --model KEY..., --all, or --list")
 
+    ok = True
     for k in keys:
-        s = catalog.MODELS.get(k)
+        s = MODELS.get(k)
         if s is None:
-            print(f"  [{k}] unknown model key — see --list"); continue
-        (download_repo if s["source"] == "hf_repo" else download_files)(k, s)
-    return 0
+            print(f"  [{k}] unknown model key — see --list"); ok = False; continue
+        ok = fetch_model(k, s, endpoints) and ok
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

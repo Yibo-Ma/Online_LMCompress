@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
-"""Normalize raw text datasets so they survive a tokenizer round-trip losslessly.
+"""Normalize raw text so it survives a tokenizer round-trip losslessly.
 
 The compressor tokenizes text then reconstructs it via ``tokenizer.decode``; a few
 characters a tokenizer cannot represent would otherwise break the byte-exact
-round-trip.  This script applies the same ``encode -> decode`` normalization the
-compressor would see, once, ahead of time.
+round-trip.  This script applies that ``encode -> decode`` normalization ahead of
+time.
 
-It batch-processes every dataset under ``data/text/raw/`` and writes the result to
-``data/text/normalized/<dataset>/`` (part-*.txt + manifest.jsonl + a summary),
-matching the layout ``download_data.py`` produces and ``eval_online.py`` reads.
+Normalization is **tokenizer-specific**, so this produces *one normalized copy per
+tokenizer*.  By default it normalizes with both the Qwen2.5 and Qwen3 tokenizers:
+
+    data/text/raw/<dataset>/            ->  data/text/normalized/<tag>/<dataset>/
+                                            tag = qwen2.5 | qwen3
+
+Compress with the matching copy: a Qwen2.5 model -> normalized/qwen2.5/...,
+a Qwen3 model -> normalized/qwen3/...  (eval_online picks this automatically).
 
 Run from the repo root:
 
-    python scripts/normalize_text.py                       # all datasets, Qwen2.5-0.5B
+    python scripts/normalize_text.py                                   # all datasets, both tokenizers
     python scripts/normalize_text.py --dataset pile_of_law_eurlex medal
-    python scripts/normalize_text.py --model checkpoints/Qwen3-1.7B-Base --force
+    python scripts/normalize_text.py --models checkpoints/Qwen3-1.7B-Base --force
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -31,9 +37,16 @@ from _common import DATA_ROOT, human_bytes  # noqa: E402
 
 RAW_ROOT = DATA_ROOT / "text" / "raw"
 NORM_ROOT = DATA_ROOT / "text" / "normalized"
-DEFAULT_MODEL = "checkpoints/Qwen2.5-0.5B"
+DEFAULT_MODELS = ["checkpoints/Qwen2.5-0.5B", "checkpoints/Qwen3-1.7B-Base"]
 SHARD_BYTES = 50 << 20
 CHUNK_BYTES = 2048              # reporting granularity (matches compressor segment size)
+
+
+def tokenizer_tag(model_path: str) -> str:
+    """Short folder tag for a tokenizer, e.g. Qwen2.5-0.5B -> 'qwen2.5'."""
+    base = os.path.basename(str(model_path).rstrip("/\\")).lower()
+    m = re.match(r"(qwen[0-9.]+)", base)
+    return m.group(1) if m else re.sub(r"[^a-z0-9.]+", "-", base).strip("-")
 
 
 def roundtrip(text: str, tok) -> str:
@@ -56,39 +69,34 @@ def read_raw(ds_dir: Path, max_bytes) -> str:
 
 
 def write_shards(text: str, out_dir: Path) -> int:
-    """Write text into part-*.txt shards of <= SHARD_BYTES; return #shards."""
     for old in out_dir.glob("part-*.txt"):
         old.unlink()
     data = text.encode("utf-8")
     n = max(1, (len(data) + SHARD_BYTES - 1) // SHARD_BYTES)
-    man = open(out_dir / "manifest.jsonl", "w", encoding="utf-8")
-    for s in range(n):
-        chunk = data[s * SHARD_BYTES:(s + 1) * SHARD_BYTES]
-        (out_dir / f"part-{s:05d}.txt").write_bytes(chunk)
-        man.write(json.dumps({"shard": s, "bytes": len(chunk)}) + "\n")
-    man.close()
+    with open(out_dir / "manifest.jsonl", "w", encoding="utf-8") as man:
+        for s in range(n):
+            chunk = data[s * SHARD_BYTES:(s + 1) * SHARD_BYTES]
+            (out_dir / f"part-{s:05d}.txt").write_bytes(chunk)
+            man.write(json.dumps({"shard": s, "bytes": len(chunk)}) + "\n")
     return n
 
 
-def normalize_dataset(key: str, tok, max_bytes, force: bool) -> dict:
+def normalize_dataset(key: str, tok, tag: str, max_bytes, force: bool) -> dict:
     src = RAW_ROOT / key
-    out = NORM_ROOT / key
+    out = NORM_ROOT / tag / key
     summary_path = out / "normalize_summary.json"
     if summary_path.exists() and not force:
         prev = json.loads(summary_path.read_text(encoding="utf-8"))
-        print(f"  [{key}] already normalized ({human_bytes(prev.get('output_bytes', 0))})"
-              f" — use --force to redo")
+        print(f"    [{key}] already normalized for {tag} "
+              f"({human_bytes(prev.get('output_bytes', 0))}) — use --force to redo")
         return prev
     out.mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
     text = read_raw(src, max_bytes)
     in_bytes = len(text.encode("utf-8"))
-    print(f"  [{key}] {human_bytes(in_bytes)} in -> normalizing ...")
-
     norm = roundtrip(text, tok)
-    # idempotency guard: a second pass must be a no-op
-    if roundtrip(norm, tok) != norm:
+    if roundtrip(norm, tok) != norm:                 # idempotency guard
         norm = roundtrip(norm, tok)
     out_bytes = len(norm.encode("utf-8"))
     changed = sum(
@@ -98,7 +106,7 @@ def normalize_dataset(key: str, tok, max_bytes, force: bool) -> dict:
     shards = write_shards(norm, out)
 
     summary = {
-        "dataset": key, "model": getattr(tok, "name_or_path", "?"),
+        "dataset": key, "tokenizer_tag": tag, "model": getattr(tok, "name_or_path", "?"),
         "input_dir": str(src), "output_dir": str(out),
         "shard_bytes": SHARD_BYTES, "roundtrip_chunk_bytes": CHUNK_BYTES,
         "max_input_bytes": max_bytes, "input_bytes": in_bytes, "output_bytes": out_bytes,
@@ -107,7 +115,7 @@ def normalize_dataset(key: str, tok, max_bytes, force: bool) -> dict:
     }
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     flag = "byte-identical" if changed == 0 else f"~{changed} chunks adjusted"
-    print(f"  [{key}] -> {out}  ({human_bytes(out_bytes)}, {flag}, {summary['seconds']}s)")
+    print(f"    [{key}] -> {out}  ({human_bytes(out_bytes)}, {flag}, {summary['seconds']}s)")
     return summary
 
 
@@ -116,33 +124,37 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
-    p = argparse.ArgumentParser(description="Normalize raw text datasets (tokenizer round-trip)")
+    p = argparse.ArgumentParser(description="Normalize raw text per tokenizer (Qwen2.5 + Qwen3)")
     p.add_argument("--dataset", nargs="*", help="dataset key(s); default: all under data/text/raw")
-    p.add_argument("--model", default=DEFAULT_MODEL, help="tokenizer path/name")
+    p.add_argument("--models", nargs="*", default=DEFAULT_MODELS,
+                   help="tokenizer model path(s); one normalized copy per tokenizer")
     p.add_argument("--max-bytes", type=int, default=None, help="cap input bytes per dataset")
     p.add_argument("--force", action="store_true", help="re-normalize even if a summary exists")
     args = p.parse_args()
 
     if not RAW_ROOT.exists():
-        print(f"No raw text at {RAW_ROOT}. Run scripts/download_data.py first."); return 1
-
-    from transformers import AutoTokenizer
-    print(f"Loading tokenizer: {args.model}")
-    tok = AutoTokenizer.from_pretrained(args.model, use_fast=False)
-
+        print(f"No raw text at {RAW_ROOT}. Run scripts/download_text.py first."); return 1
     keys = args.dataset or sorted(d.name for d in RAW_ROOT.iterdir() if d.is_dir())
     if not keys:
         print(f"No datasets under {RAW_ROOT}."); return 1
 
-    NORM_ROOT.mkdir(parents=True, exist_ok=True)
-    index = []
-    for k in keys:
-        if not (RAW_ROOT / k).is_dir():
-            print(f"  [{k}] no raw dir; skip"); continue
-        index.append(normalize_dataset(k, tok, args.max_bytes, args.force))
-    (NORM_ROOT / "normalize_summary.jsonl").write_text(
-        "\n".join(json.dumps(s, ensure_ascii=False) for s in index), encoding="utf-8")
-    print(f"\nNormalized {len(index)} dataset(s) -> {NORM_ROOT}")
+    from transformers import AutoTokenizer
+    for model in args.models:
+        tag = tokenizer_tag(model)
+        print(f"\n=== tokenizer '{tag}'  ({model}) ===")
+        try:
+            tok = AutoTokenizer.from_pretrained(model, use_fast=False)
+        except Exception as e:
+            print(f"  could not load tokenizer {model}: {type(e).__name__}: {e}")
+            print(f"  (download it first: python scripts/download_models.py --model <key>)")
+            continue
+        out_root = NORM_ROOT / tag
+        out_root.mkdir(parents=True, exist_ok=True)
+        index = [normalize_dataset(k, tok, tag, args.max_bytes, args.force)
+                 for k in keys if (RAW_ROOT / k).is_dir()]
+        (out_root / "normalize_summary.jsonl").write_text(
+            "\n".join(json.dumps(s, ensure_ascii=False) for s in index), encoding="utf-8")
+        print(f"  normalized {len(index)} dataset(s) -> {out_root}")
     return 0
 
 
