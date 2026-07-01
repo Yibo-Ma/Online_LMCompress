@@ -214,6 +214,45 @@ def _progress(name: str, done: int, total: Optional[int]) -> None:
     sys.stdout.flush()
 
 
+def stream_hf_lines(url: str, timeout: int = 120):
+    """Stream a line-based data file (``.jsonl`` / ``.jsonl.gz`` / ``.jsonl.xz``) over
+    HTTP and yield its decoded lines *without* downloading the whole file — so a byte
+    cap on the caller also caps the download.  Decompression is chosen by extension.
+
+    Used to fetch HF data files straight from the mirror when a dataset's loading
+    *script* hardcodes ``https://huggingface.co/...`` URLs (pile-of-law, edgar-corpus,
+    ...), which ``HF_ENDPOINT`` cannot rewrite.  Redirects are followed, so it works
+    whether the mirror serves the file directly or 308-redirects to the origin.
+    """
+    u = url.lower()
+    if u.endswith(".xz"):
+        import lzma
+        dec = lzma.LZMADecompressor()
+        feed, flush = dec.decompress, (lambda: b"")
+    elif u.endswith(".gz"):
+        import zlib
+        dec = zlib.decompressobj(zlib.MAX_WBITS | 16)      # gzip
+        feed, flush = dec.decompress, dec.flush
+    else:
+        feed, flush = (lambda b: b), (lambda: b"")         # plain text
+
+    session = _session_with_retries()
+    buf = b""
+    with session.get(url, stream=True, timeout=timeout) as r:
+        r.raise_for_status()
+        for chunk in r.iter_content(chunk_size=1 << 20):
+            if not chunk:
+                continue
+            buf += feed(chunk)
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                yield line.decode("utf-8", errors="ignore")
+    buf += flush()
+    for line in buf.splitlines():
+        if line:
+            yield line.decode("utf-8", errors="ignore")
+
+
 # --------------------------------------------------------------------------
 # Manifests (progress sidecars)
 # --------------------------------------------------------------------------

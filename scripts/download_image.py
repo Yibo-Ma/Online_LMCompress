@@ -30,9 +30,9 @@ DEFAULT_LIMIT = 24
 IMG_EXTS = (".png", ".bmp", ".jpg", ".jpeg", ".tif", ".tiff")
 
 DATASETS = {
-    "kodak": dict(kind="url_files",
-                  urls=[f"https://r0k.us/graphics/kodak/kodak/kodim{i:02d}.png" for i in range(1, 25)],
-                  license="free research (benchmark)", gain="low"),
+    "kodak": dict(kind="hf", hf_id="msdkhairi/kodak", split="train", image_key="image",
+                  license="free research (benchmark)", gain="low",
+                  note="24 lossless 768x512 PNGs; via HF mirror because r0k.us IP-blocks some clusters"),
     "div2k": dict(kind="url_zip", url="http://data.vision.ee.ethz.ch/cvl/DIV2K/DIV2K_valid_HR.zip",
                   license="academic research only (non-commercial)", gain="low"),
     "clic2024": dict(kind="url_zip",

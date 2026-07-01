@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (  # noqa: E402
     DATA_ROOT, external_guard, http_download, human_bytes, parse_size,
     read_zip_member, load_progress, save_progress, setup_hf_endpoint,
-    write_download_status,
+    stream_hf_lines, write_download_status,
 )
 
 RAW = DATA_ROOT / "text" / "raw"
@@ -60,18 +60,23 @@ DATASETS = {
                     url="https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz",
                     license="public", gain="med"),
     # --- HF (work through hf-mirror) ---
-    "pile_of_law_eurlex": dict(kind="hf", hf_id="pile-of-law/pile-of-law", config="eurlex",
-                               split="train", fields=["text"],
-                               license="CC-BY-NC-SA (non-commercial)", gain="high"),
-    "atticus_contracts":  dict(kind="hf", hf_id="pile-of-law/pile-of-law", config="atticus_contracts",
-                               split="train", fields=["text"], license="CC-BY 4.0", gain="high"),
+    "pile_of_law_eurlex": dict(kind="hf_lines", repo="pile-of-law/pile-of-law",
+                               files=["data/train.eurlex.jsonl.xz"], fields=["text"],
+                               license="CC-BY-NC-SA (non-commercial)", gain="high",
+                               note="direct mirror .jsonl.xz — the loading script hardcodes hf.co"),
+    "atticus_contracts":  dict(kind="hf_lines", repo="pile-of-law/pile-of-law",
+                               files=[f"data/train.atticus_contracts.{i}.jsonl.xz" for i in range(5)],
+                               fields=["text"], license="CC-BY 4.0", gain="high",
+                               note="direct mirror .jsonl.xz shards — the loading script hardcodes hf.co"),
     "codesearchnet":      dict(kind="hf", hf_id="code_search_net", config="python",
                                split="train", fields=["whole_func_string"],
                                license="MIT (code: per-file OSS)", gain="high"),
     "medal":              dict(kind="hf", hf_id="McGill-NLP/medal", config=None, split="train",
                                fields=["text"], license="MIT + NLM terms", gain="med"),
-    "edgar_corpus":       dict(kind="hf", hf_id="eloukas/edgar-corpus", config="year_2020",
-                               split="train", fields=None, license="public (SEC)", gain="high"),
+    "edgar_corpus":       dict(kind="hf_lines", repo="eloukas/edgar-corpus",
+                               files=["2020/train.jsonl"], fields=None,
+                               license="public (SEC)", gain="high",
+                               note="direct mirror .jsonl — faster than the loading script"),
     "hupd":               dict(kind="hf", hf_id="HUPD/hupd", config="sample", split="train",
                                fields=["title", "abstract", "claims", "background", "description"],
                                streaming=False, load_kwargs=dict(trust_remote_code=True, uniform_split=True),
@@ -154,6 +159,50 @@ def dl_hf(key, spec, out, limit, force):
             break
     sh.close(source=spec["hf_id"], gain=spec.get("gain"))
     print(f"  [{key}] -> {out}  ({human_bytes(sh.bytes)}, {sh.rows} docs)")
+    if sh.bytes == 0:
+        raise RuntimeError(
+            f"got 0 docs — this dataset's loader likely fetches from huggingface.co "
+            f"directly (bypassing the mirror), so it can't work in a mirror-only env")
+
+
+def dl_hf_lines(key, spec, out, limit, force):
+    """Fetch line-based HF data files (.jsonl / .jsonl.gz / .jsonl.xz) straight from the
+    mirror, streaming + decompressing so ``--limit`` caps the download.  Bypasses the
+    dataset's loading script, which hardcodes ``huggingface.co`` URLs (``HF_ENDPOINT``
+    can't rewrite those, so ``load_dataset`` fails / returns empty in a mirror-only env)."""
+    endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+    out.mkdir(parents=True, exist_ok=True)
+    if load_progress(out).get("bytes", 0) >= limit:
+        print(f"  [{key}] already {human_bytes(load_progress(out)['bytes'])} (>= limit)"); return
+
+    # fresh parse each run (streaming caps the download, so re-running to extend is cheap)
+    for p in out.glob("part-*.txt"):
+        p.unlink()
+    (out / "manifest.jsonl").unlink(missing_ok=True)
+    save_progress(out, rows=0, bytes=0, shard=0)
+
+    sh = Sharder(out, key)
+    for rel in spec["files"]:
+        if sh.bytes >= limit:
+            break
+        url = f"{endpoint}/datasets/{spec['repo']}/resolve/main/{rel}"
+        print(f"  [{key}] {url}")
+        for line in stream_hf_lines(url):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            t = _row_text(rec, spec.get("fields"))
+            if t:
+                sh.add(t, source=spec["repo"], config=key)
+            if sh.bytes >= limit:
+                break
+    sh.close(source=spec["repo"], gain=spec.get("gain"))
+    print(f"  [{key}] -> {out}  ({human_bytes(sh.bytes)}, {sh.rows} docs)")
+    if sh.bytes == 0:
+        raise RuntimeError("got 0 docs — the mirror data-file URL was unreachable")
 
 
 def dl_url_zip(key, spec, out, limit, force):
@@ -226,8 +275,9 @@ def dl_url_tar_text(key, spec, out, limit, force):
     print(f"  [{key}] -> {out}  ({human_bytes(sh.bytes)}, {sh.rows} files)")
 
 
-HANDLERS = {"hf": dl_hf, "url_zip": dl_url_zip, "github_members": dl_github_members,
-            "github_logs": dl_github_logs, "url_tar_text": dl_url_tar_text}
+HANDLERS = {"hf": dl_hf, "hf_lines": dl_hf_lines, "url_zip": dl_url_zip,
+            "github_members": dl_github_members, "github_logs": dl_github_logs,
+            "url_tar_text": dl_url_tar_text}
 
 
 # ---------------------------------------------------------------------------
