@@ -58,6 +58,27 @@ def setup_hf_endpoint(use_mirror: bool = True, endpoint: Optional[str] = None) -
     return chosen
 
 
+def _enable_fast_download() -> None:
+    """Turn on hf_transfer (Rust multi-threaded HTTP) for every HF download unless the
+    user set ``HF_HUB_ENABLE_HF_TRANSFER`` explicitly.  No-op if the package isn't
+    installed — setting the flag without it makes huggingface_hub raise at download time.
+    """
+    if "HF_HUB_ENABLE_HF_TRANSFER" in os.environ:
+        return                                   # respect an explicit opt-in / opt-out
+    try:
+        import hf_transfer  # noqa: F401
+    except Exception:
+        return
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+
+
+_enable_fast_download()                          # runs on import, before any HF library is loaded
+
+# Slow mirror: give the metadata HEAD and file download more than huggingface_hub's 10s default.
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
+
+
 # --------------------------------------------------------------------------
 # Sizes / pretty printing
 # --------------------------------------------------------------------------
@@ -92,31 +113,67 @@ def parse_size(s) -> Optional[int]:
 # Resumable HTTP download with optional byte cap
 # --------------------------------------------------------------------------
 
+def _session_with_retries(total: int = 4, backoff: float = 1.0):
+    """A requests Session that retries connect / read / 5xx errors with backoff —
+    academic and GitHub hosts are flaky, and a single hiccup shouldn't fail a dataset."""
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    retry = Retry(total=total, connect=total, read=total, backoff_factor=backoff,
+                  status_forcelist=(408, 429, 500, 502, 503, 504),
+                  allowed_methods=frozenset(["GET"]), raise_on_status=False)
+    s = requests.Session()
+    s.mount("http://", HTTPAdapter(max_retries=retry))
+    s.mount("https://", HTTPAdapter(max_retries=retry))
+    return s
+
+
 def http_download(
     url: str,
     dest: Path,
     limit_bytes: Optional[int] = None,
     chunk: int = 1 << 20,
     desc: str = "",
+    retries: int = 4,
+    timeout: int = 120,
 ) -> int:
     """Download ``url`` -> ``dest`` resumably; stop after ``limit_bytes`` total.
 
-    * If ``dest`` already holds ``cur`` bytes, request ``Range: bytes=cur-`` so an
-      interrupted transfer (or a previous smaller ``--limit``) continues appending.
-    * If the server ignores Range (returns 200) we restart from scratch.
-    * Returns the final size of ``dest`` in bytes.
+    Connect / read / 5xx errors are retried by the session; a mid-stream drop is
+    retried here by resuming from the partial file (HTTP Range), so flaky links don't
+    lose progress or fail the dataset.  Returns the final size of ``dest`` in bytes.
     """
     import requests
+    import time
 
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    cur = dest.stat().st_size if dest.exists() else 0
+    session = _session_with_retries(total=retries)
 
+    for attempt in range(retries + 1):
+        try:
+            return _http_stream_once(session, url, dest, limit_bytes, chunk, desc, timeout)
+        except (requests.RequestException, OSError) as e:
+            have = dest.stat().st_size if dest.exists() else 0
+            if limit_bytes is not None and have >= limit_bytes:
+                return have
+            if attempt >= retries:
+                raise
+            wait = min(2 ** attempt, 30)
+            sys.stdout.write(f"\n  {desc or dest.name}: {type(e).__name__} — resume "
+                             f"@ {human_bytes(have)}, retry {attempt + 1}/{retries} in {wait}s\n")
+            sys.stdout.flush()
+            time.sleep(wait)
+
+
+def _http_stream_once(session, url, dest, limit_bytes, chunk, desc, timeout) -> int:
+    cur = dest.stat().st_size if dest.exists() else 0
     if limit_bytes is not None and cur >= limit_bytes:
         return cur  # already have enough
 
     headers = {"Range": f"bytes={cur}-"} if cur else {}
-    with requests.get(url, headers=headers, stream=True, timeout=60) as r:
+    with session.get(url, headers=headers, stream=True, timeout=timeout) as r:
         # 416 => our file is already complete; 200 w/ cur>0 => server ignored Range.
         if r.status_code == 416:
             return cur
@@ -132,9 +189,8 @@ def http_download(
         if limit_bytes is not None:
             total = min(total, limit_bytes) if total else limit_bytes
 
-        mode = "ab" if cur else "wb"
         written = cur
-        with open(dest, mode) as f:
+        with open(dest, "ab" if cur else "wb") as f:
             for block in r.iter_content(chunk_size=chunk):
                 if not block:
                     continue
@@ -247,8 +303,6 @@ def stream_extract_tar(url: str, out_dir: Path, limit: int,
     skipped (a re-run re-streams from the start but only down to the new limit).
     Returns the number of files now present.
     """
-    import requests
-
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     have = len(list(out_dir.glob(f"{prefix}_*")))
@@ -258,7 +312,7 @@ def stream_extract_tar(url: str, out_dir: Path, limit: int,
     u = url.lower()
     mode = "r|bz2" if u.endswith(".bz2") else ("r|gz" if u.endswith((".gz", ".tgz")) else "r|")
     n, seen = have, 0
-    with requests.get(url, stream=True, timeout=60) as r:
+    with _session_with_retries().get(url, stream=True, timeout=120) as r:
         r.raise_for_status()
         r.raw.decode_content = True                       # undo any HTTP content-encoding
         with tarfile.open(fileobj=r.raw, mode=mode) as tf:

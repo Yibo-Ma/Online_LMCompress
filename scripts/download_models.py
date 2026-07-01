@@ -7,6 +7,7 @@ Examples
 --------
     python scripts/download_models.py --model qwen3-1.7b
     python scripts/download_models.py --model qwen2.5-0.5b qwen2.5-7b qwen3-1.7b qwen3-4b qwen3-8b bgpt
+    python scripts/download_models.py --model qwen3-1.7b --fast   # aria2c multi-connection (fastest)
     python scripts/download_models.py --all
     python scripts/download_models.py --list
 
@@ -21,7 +22,10 @@ Downloads are resumable, so an interrupted pull continues. If both endpoints fai
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
+import shutil
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -71,12 +75,49 @@ def download_files(spec: dict, endpoint: str) -> None:
                         local_dir=str(dest), endpoint=endpoint)
 
 
-def fetch_model(name: str, spec: dict, endpoints: list[str]) -> bool:
-    fn = download_repo if spec["source"] == "hf_repo" else download_files
+def _aria2_get(url: str, dest) -> None:
+    """Download one file with aria2c: multi-connection, resumable (-c)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["aria2c", "-x16", "-s16", "-k1M", "-c", "--auto-file-renaming=false",
+         "--console-log-level=warn", "-d", str(dest.parent), "-o", dest.name, url],
+        check=True,
+    )
+
+
+def _repo_files(spec: dict, endpoint: str) -> list[str]:
+    """The files to fetch for a model: explicit list for hf_files, else the repo's
+    file listing minus duplicate consolidated weights."""
+    if spec["source"] == "hf_files":
+        return list(spec["files"])
+    from huggingface_hub import HfApi
+    ignore = ("*.pth", "*.msgpack", "*.h5", "original/*")
+    return [f for f in HfApi(endpoint=endpoint).list_repo_files(spec["repo"])
+            if not any(fnmatch.fnmatch(f, pat) for pat in ignore)]
+
+
+def download_aria2(spec: dict, endpoint: str) -> None:
+    """Fast path: resolve the repo's file list, then pull each file with aria2c.
+    Much faster than the Python client on large weights; needs ``aria2c`` on PATH."""
+    dest = CKPT_ROOT / spec["dir"]
+    for f in _repo_files(spec, endpoint):
+        _aria2_get(f"{endpoint}/{spec['repo']}/resolve/main/{f}", dest / f)
+
+
+def fetch_model(name: str, spec: dict, endpoints: list[str], fast: bool = False) -> bool:
+    use_aria = fast and shutil.which("aria2c") is not None
+    if fast and not use_aria:
+        print(f"  [{name}] --fast needs aria2c on PATH (conda install -c conda-forge aria2); "
+              f"using the normal downloader")
+    if use_aria:
+        fn = download_aria2
+    else:
+        fn = download_repo if spec["source"] == "hf_repo" else download_files
     last = None
     for ep in endpoints:
         try:
-            print(f"  [{name}] {spec['repo']} via {ep} -> checkpoints/{spec['dir']}")
+            print(f"  [{name}] {spec['repo']} via {ep}"
+                  f"{' (aria2c)' if use_aria else ''} -> checkpoints/{spec['dir']}")
             fn(spec, ep)
             print(f"  [{name}] done")
             return True
@@ -104,6 +145,8 @@ def main() -> int:
     p.add_argument("--list", action="store_true")
     p.add_argument("--no-mirror", action="store_true", help="use huggingface.co only")
     p.add_argument("--hf-endpoint", default=None, help="force a single endpoint URL")
+    p.add_argument("--fast", action="store_true",
+                   help="use aria2c multi-connection downloads (much faster; needs aria2c on PATH)")
     args = p.parse_args()
 
     if args.list:
@@ -123,7 +166,7 @@ def main() -> int:
         s = MODELS.get(k)
         if s is None:
             print(f"  [{k}] unknown model key — see --list"); ok = False; continue
-        ok = fetch_model(k, s, endpoints) and ok
+        ok = fetch_model(k, s, endpoints, args.fast) and ok
     return 0 if ok else 1
 
 

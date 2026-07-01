@@ -12,6 +12,7 @@ transformers==4.53.2
 tokenizers==0.21.2
 huggingface_hub==0.33.4
 datasets==3.6.0       # HF dataset loaders + downloader (last line with loading-script support)
+hf_transfer           # fast Rust downloader; auto-enabled by scripts/_common.py (helps hf-mirror)
 
 peft
 constriction          # range coder backend
