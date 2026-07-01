@@ -13,6 +13,11 @@ Run from the repo root.
 
 ``--limit`` = number of clips per dataset.  bGPT eval reads these as WAV/FLAC
 blobs (see eval_online --modality audio).
+
+tar(.gz/.bz2) sources (librispeech/ljspeech/nsynth/esc50/speech_commands) are
+**streamed**: the connection is closed once ``--limit`` clips are extracted, so
+``--limit`` also caps how much is downloaded.  zip sources (MAESTRO) keep their
+index at the end, so they must download fully before extracting ``--limit`` wavs.
 """
 from __future__ import annotations
 
@@ -23,8 +28,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (  # noqa: E402
-    DATA_ROOT, external_guard, extract_media, http_download, setup_hf_endpoint,
-    save_progress, write_download_status,
+    DATA_ROOT, external_guard, extract_media, http_download, is_streamable_tar,
+    save_progress, setup_hf_endpoint, stream_extract_tar, write_download_status,
 )
 
 AUD = DATA_ROOT / "audio"
@@ -52,37 +57,53 @@ DATASETS = {
                             license="CC-BY 4.0", gain="med",
                             note="short spoken words; many near-identical utterances"),
     "esc50": dict(kind="url_tar",
-                  url="https://github.com/karoldvl/ESC-50/archive/master.zip",
+                  url="https://github.com/karoldvl/ESC-50/archive/master.tar.gz",
                   license="CC BY-NC 3.0 (non-commercial)", gain="high",
                   note="environmental sounds; stationary texture (bioacoustic-like)"),
 }
 
 
 def dl_url_tar(key, spec, out, limit):
+    """tar(.gz/.bz2): stream and close the connection after ``limit`` clips, so
+    ``--limit`` caps the download size.  zip (MAESTRO) keeps its index at the end,
+    so it must download fully before we can extract ``limit`` clips."""
     out.mkdir(parents=True, exist_ok=True)
-    src = out / ("_source" + "".join(Path(spec["url"]).suffixes[-2:]))
-    big = "MAESTRO" if key == "maestro" else ""
-    print(f"  [{key}] {spec['url']} {('('+big+' is ~120GB)') if big else ''}")
-    http_download(spec["url"], src, desc=f"{key} src")
-    n = extract_media(src, out, limit, AUDIO_EXTS, "clip")
-    save_progress(out, clips=n, source=spec["url"], gain=spec.get("gain"))
+    url = spec["url"]
+    if is_streamable_tar(url):
+        print(f"  [{key}] {url}  (streaming; stops after {limit} clips)")
+        n = stream_extract_tar(url, out, limit, AUDIO_EXTS, "clip", desc=key)
+    else:
+        big = " (MAESTRO is ~120GB)" if key == "maestro" else ""
+        print(f"  [{key}] {url}{big}  (zip: downloads fully, then extracts {limit} clips)")
+        src = out / ("_source" + "".join(Path(url).suffixes[-2:]))
+        http_download(url, src, desc=f"{key} src")
+        n = extract_media(src, out, limit, AUDIO_EXTS, "clip")
+    save_progress(out, clips=n, source=url, gain=spec.get("gain"))
     print(f"  [{key}] -> {out}  ({n} clips)")
 
 
 def dl_hf_parquet(key, spec, out, limit):
-    from datasets import load_dataset, Audio
+    """Stream the HF parquet and stop after ``limit`` clips so --limit caps the
+    download (the old non-streaming path pulled the whole split first).  Audio stays
+    raw bytes (decode=False -> no librosa).  The written parquet keeps the same
+    {audio:{bytes,path}, ...} schema the loader expects (utils/audio_utils)."""
+    from datasets import load_dataset, Audio, Dataset
     out.mkdir(parents=True, exist_ok=True)
     dst = out / f"{spec.get('config', 'data')}-{spec['split']}.parquet"
     if dst.exists():
         print(f"  [{key}] {dst.name} exists; skip"); return
-    print(f"  [{key}] {spec['hf_id']} ({spec.get('config')}) -> parquet (raw bytes, no decode)")
-    ds = load_dataset(spec["hf_id"], spec.get("config"), split=spec["split"])
+    print(f"  [{key}] {spec['hf_id']} ({spec.get('config')}) -> parquet "
+          f"(streaming raw bytes; stops after {limit} clips)")
+    ds = load_dataset(spec["hf_id"], spec.get("config"), split=spec["split"], streaming=True)
     ds = ds.cast_column(spec.get("audio_key", "audio"), Audio(decode=False))
-    if limit:
-        ds = ds.select(range(min(limit, len(ds))))
-    ds.to_parquet(str(dst))
-    save_progress(out, clips=len(ds), source=spec["hf_id"], gain=spec.get("gain"))
-    print(f"  [{key}] -> {dst}  ({len(ds)} clips)")
+    rows = []
+    for row in ds:
+        rows.append(row)
+        if limit and len(rows) >= limit:
+            break
+    Dataset.from_list(rows).to_parquet(str(dst))
+    save_progress(out, clips=len(rows), source=spec["hf_id"], gain=spec.get("gain"))
+    print(f"  [{key}] -> {dst}  ({len(rows)} clips)")
 
 
 HANDLERS = {"url_tar": dl_url_tar, "hf_parquet": dl_hf_parquet}

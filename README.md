@@ -59,11 +59,13 @@ evaluation/
   eval_online.py         online/static round-trip eval (this project)
   eval_bgpt.py eval_llm.py image_codec_baselines.py   base benchmarks (kept for reference)
 scripts/
-  catalog.py             single source of truth: datasets + model weights
+  setup.py               one-command: models + data + normalize (orchestrates the below)
   download_models.py     weights  -> checkpoints/   (hf-mirror aware, resumable)
-  download_data.py       datasets -> data/          (length-capped, resumable, append-extend)
-  download_manual.py     helpers for silesia / maestro / musdb18 (special sources)
-  normalize_text.py      tokenizer round-trip normalize: data/text/raw -> data/text/normalized
+  download_text.py       text  datasets -> data/text/raw/  (byte-capped, resumable)
+  download_image.py      image datasets -> data/image/     (count-capped, resumable)
+  download_audio.py      audio datasets -> data/audio/     (count-capped, tar streamed)
+  download_manual.py     special sources (clic2024 / chestxray14 / musdb18 / icbhi)
+  normalize_text.py      tokenizer round-trip normalize: data/text/raw -> data/text/normalized/<tag>/
 data/                    text/{raw,normalized}/  image/  audio/   (git-ignored; filled by scripts)
 checkpoints/             Qwen2.5-0.5B, Qwen3-*, bgpt/weights-*.pth (git-ignored; filled by scripts)
 ```
@@ -77,7 +79,9 @@ checkpoints/             Qwen2.5-0.5B, Qwen3-*, bgpt/weights-*.pth (git-ignored;
 **One command** (default models + data + normalize, all-3-modality runnable):
 
 ```bash
-pip install -r requirements.txt
+conda create -n olmc -c conda-forge python=3.11 -y && conda activate olmc
+pip install torch --index-url https://download.pytorch.org/whl/cu121   # GPU; omit --index-url for CPU
+pip install -r requirements.txt   # HuggingFace libs are pinned here — see the comment in that file
 python scripts/setup.py            # add --dry-run to preview, --no-mirror to skip the mirror
 ```
 
@@ -88,10 +92,10 @@ Or step by step:
 python scripts/download_models.py --model qwen2.5-0.5b bgpt      # or --all / --list
 
 # 2. datasets -> data/   (--limit = bytes for text, item count for image/audio)
-python scripts/download_data.py --dataset pile_of_law_eurlex --limit 20MB
-python scripts/download_data.py --dataset kodak                  # image default (24 imgs)
-python scripts/download_data.py --list                           # full catalog (key|gain|domain)
-python scripts/download_manual.py silesia                        # special-source datasets
+python scripts/download_text.py  --dataset pile_of_law_eurlex --limit 20MB
+python scripts/download_image.py --dataset kodak                 # 24 images
+python scripts/download_audio.py --dataset librispeech --limit 50
+python scripts/download_text.py  --list                          # per-modality catalog (each has --list)
 
 # 3. normalize text so it survives the tokenizer round-trip (AFTER models — needs the tokenizer)
 python scripts/normalize_text.py --dataset pile_of_law_eurlex    # or all datasets

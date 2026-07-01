@@ -1,7 +1,18 @@
 # Core
-torch
+torch                 # GPU: pip install torch --index-url https://download.pytorch.org/whl/cu121
 numpy
-transformers
+
+# --- HuggingFace stack: versions PINNED on purpose ---
+# The 2026 releases (transformers 5.x / datasets 5.x / huggingface_hub 1.x) removed
+# dataset loading-script support and tightened Hub file-metadata checks, which breaks
+# the script-based datasets (pile_of_law, medal, edgar_corpus, hupd, ...) *and* is
+# unfriendly to hf-mirror.com.  This 2025 set keeps Qwen3 support while still loading
+# those datasets through the mirror.  Do NOT bump without re-testing scripts/download_text.py.
+transformers==4.53.2
+tokenizers==0.21.2
+huggingface_hub==0.33.4
+datasets==3.6.0       # HF dataset loaders + downloader (last line with loading-script support)
+
 peft
 constriction          # range coder backend
 tqdm
@@ -11,5 +22,4 @@ pillow                # image (PIL)
 pydub                 # audio chunking
 soundfile             # audio decoding (no ffmpeg needed)
 pandas                # parquet audio datasets
-datasets              # HF dataset loaders + downloader
 samplings             # required by bgpt/utils.py

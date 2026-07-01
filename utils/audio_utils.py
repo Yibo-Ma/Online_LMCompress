@@ -61,8 +61,19 @@ def _find_audio_loader(path: str) -> AudioLoader:
 
 
 def load_audio_samples(path: str, n: Optional[int] = None) -> List[Any]:
-    """Dispatch to the registered loader for the audio dataset at *path*."""
-    return _find_audio_loader(path)(path, n)
+    """Dispatch to the registered loader for the audio dataset at *path*.
+
+    Falls back to a plain directory of clips (clip_*.wav/.flac/.ogg/.mp3) when no
+    named loader matches — this covers the tar/url datasets (librispeech, ljspeech,
+    nsynth, esc50, speech_commands) which download as a folder of audio files.
+    """
+    try:
+        loader = _find_audio_loader(path)
+    except ValueError:
+        if os.path.isdir(path):
+            return _load_audio_dir(path, n)
+        raise
+    return loader(path, n)
 
 
 # Backward-compat alias
@@ -78,16 +89,18 @@ def _load_audio_dir(
     n: Optional[int],
     extensions: Sequence[str] = (".wav", ".flac", ".ogg", ".mp3"),
 ) -> List[str]:
+    """List audio files under *path*, recursing into subdirectories so both flat
+    (clip_*.wav) and nested (speaker/chapter/, per-label/, ...) layouts work."""
     if not os.path.isdir(path):
         raise FileNotFoundError(f"Audio dataset directory not found: {path}")
     files: List[str] = []
     for ext in extensions:
-        files.extend(_glob.glob(os.path.join(path, f"*{ext}")))
-        files.extend(_glob.glob(os.path.join(path, f"*{ext.upper()}")))
+        files.extend(_glob.glob(os.path.join(path, "**", f"*{ext}"), recursive=True))
+        files.extend(_glob.glob(os.path.join(path, "**", f"*{ext.upper()}"), recursive=True))
     files = sorted(set(files))
     if not files:
         raise FileNotFoundError(
-            f"No audio files ({', '.join(extensions)}) found in {path}"
+            f"No audio files ({', '.join(extensions)}) found under {path}"
         )
     return files[:n] if n is not None else files
 

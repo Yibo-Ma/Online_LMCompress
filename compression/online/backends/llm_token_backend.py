@@ -43,7 +43,7 @@ class _LLMTokenBackend(OnlineBackend):
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = (
             AutoModelForCausalLM
-            .from_pretrained(self.model_path, dtype=torch.float32)
+            .from_pretrained(self.model_path, torch_dtype=torch.float32)
             .to(self.device)
             .eval()
         )

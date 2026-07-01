@@ -58,7 +58,7 @@ def _load_model(model_path: str, device: torch.device):
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     m = AutoModelForCausalLM.from_pretrained(
-        model_path, dtype=torch.float16,
+        model_path, torch_dtype=torch.float16,
     ).to(device).eval()
     return m, tok
 

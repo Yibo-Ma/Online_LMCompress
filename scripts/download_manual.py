@@ -4,15 +4,16 @@
 Everything that downloads cleanly lives in download_text/image/audio.py.  What's
 left needs a special step:
 
-  clic2024     image — behind the challenge site (registration / shifting URLs)
   chestxray14  image — NIH images are split across Box tarballs (Box UI / batch script)
   musdb18      audio — ships as multitrack .stem.mp4; needs the `musdb` decoder
   icbhi        audio — respiratory sounds, behind a registration form
 
+(CLIC is now auto-downloadable — see `scripts/download_image.py --dataset clic2024`.)
+
 Run from the repo root:
 
     python scripts/download_manual.py musdb18 --limit 20     # auto if `musdb` is installed
-    python scripts/download_manual.py clic2024               # prints instructions
+    python scripts/download_manual.py chestxray14            # prints instructions
 """
 from __future__ import annotations
 
@@ -23,15 +24,6 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import DATA_ROOT  # noqa: E402
-
-
-def do_clic2024(args) -> None:
-    print(
-        "  [clic2024] MANUAL — professional image benchmark (CLIC).\n"
-        "    Download the 'professional' validation/test images from\n"
-        "      https://clic2024.compression.cc/  (or the CLIC2022/2021 mirrors)\n"
-        "    and place them in  data/image/clic2024/raw/   (png/bmp).\n"
-        "    License: research use.")
 
 
 def do_chestxray14(args) -> None:
@@ -73,8 +65,7 @@ def do_musdb18(args) -> None:
     print(f"  [musdb18] -> {out}  ({n} mixture wavs)")
 
 
-HANDLERS = {"clic2024": do_clic2024, "chestxray14": do_chestxray14,
-            "icbhi": do_icbhi, "musdb18": do_musdb18}
+HANDLERS = {"chestxray14": do_chestxray14, "icbhi": do_icbhi, "musdb18": do_musdb18}
 
 
 def main() -> int:
@@ -82,7 +73,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
-    p = argparse.ArgumentParser(description="Manual-step datasets (clic2024 / chestxray14 / musdb18 / icbhi)")
+    p = argparse.ArgumentParser(description="Manual-step datasets (chestxray14 / musdb18 / icbhi)")
     p.add_argument("dataset", choices=list(HANDLERS))
     p.add_argument("--limit", type=int, default=30, help="musdb18: # clips to extract")
     args = p.parse_args()

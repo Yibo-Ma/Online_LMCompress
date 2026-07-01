@@ -15,6 +15,9 @@ tokenizer*.  By default it normalizes with both the Qwen2.5 and Qwen3 tokenizers
 Compress with the matching copy: a Qwen2.5 model -> normalized/qwen2.5/...,
 a Qwen3 model -> normalized/qwen3/...  (eval_online picks this automatically).
 
+Each run records, per dataset, exactly which characters the round-trip changed
+(``char_changes`` in ``normalize_summary.json``) and prints a compact breakdown.
+
 Run from the repo root:
 
     python scripts/normalize_text.py                                   # all datasets, both tokenizers
@@ -29,6 +32,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -52,6 +56,58 @@ def tokenizer_tag(model_path: str) -> str:
 def roundtrip(text: str, tok) -> str:
     ids = tok(text, add_special_tokens=False)["input_ids"]
     return tok.decode(ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+
+
+def char_label(c: str) -> str:
+    """Unambiguous, legible label for one character, e.g. '’' -> "U+2019 '’'".
+    Non-printable characters show the codepoint alone."""
+    cp = f"U+{ord(c):04X}"
+    return f"{cp} {c!r}" if c.isprintable() else cp
+
+
+def char_diff(orig: str, norm: str) -> dict:
+    """Which characters the round-trip changed.
+
+    Length-preserving edits are reported as exact old->new ``substitutions``;
+    otherwise as multiset deltas (``removed`` / ``added``), since a changed length
+    has no unambiguous 1:1 alignment.  Returns ``{"changed": False}`` when identical.
+    """
+    if orig == norm:
+        return {"changed": False}
+    if len(orig) == len(norm):
+        subs = Counter((a, b) for a, b in zip(orig, norm) if a != b)
+        return {
+            "changed": True, "mode": "substitution",
+            "edits": sum(subs.values()), "distinct": len(subs),
+            "substitutions": [{"from": char_label(a), "to": char_label(b), "count": n}
+                              for (a, b), n in subs.most_common()],
+        }
+    removed, added = Counter(orig) - Counter(norm), Counter(norm) - Counter(orig)
+    return {
+        "changed": True, "mode": "length-changed",
+        "edits": sum(removed.values()) + sum(added.values()),
+        "distinct": len(removed) + len(added),
+        "removed": {char_label(c): n for c, n in removed.most_common()},
+        "added": {char_label(c): n for c, n in added.most_common()},
+    }
+
+
+def print_char_changes(cc: dict, top: int = 8, indent: str = "        ") -> None:
+    """Compact, capped console breakdown of a :func:`char_diff` result.
+
+    Codepoints only, so it renders in any terminal / log; the glyph-annotated
+    labels live in ``normalize_summary.json``.
+    """
+    cp = lambda label: label.split(" ", 1)[0]        # "U+2019 '’'" -> "U+2019"
+    if cc["mode"] == "substitution":
+        rows = [f"{cp(s['from'])} -> {cp(s['to'])}  x{s['count']}" for s in cc["substitutions"]]
+    else:
+        rows = ([f"- {cp(lbl)}  x{n}" for lbl, n in cc["removed"].items()]
+                + [f"+ {cp(lbl)}  x{n}" for lbl, n in cc["added"].items()])
+    for r in rows[:top]:
+        print(indent + r)
+    if len(rows) > top:
+        print(f"{indent}... and {len(rows) - top} more (see normalize_summary.json)")
 
 
 def read_raw(ds_dir: Path, max_bytes) -> str:
@@ -103,6 +159,7 @@ def normalize_dataset(key: str, tok, tag: str, max_bytes, force: bool) -> dict:
         1 for i in range(0, len(text), CHUNK_BYTES)
         if text[i:i + CHUNK_BYTES] != norm[i:i + CHUNK_BYTES]
     )
+    chars = char_diff(text, norm)
     shards = write_shards(norm, out)
 
     summary = {
@@ -111,11 +168,15 @@ def normalize_dataset(key: str, tok, tag: str, max_bytes, force: bool) -> dict:
         "shard_bytes": SHARD_BYTES, "roundtrip_chunk_bytes": CHUNK_BYTES,
         "max_input_bytes": max_bytes, "input_bytes": in_bytes, "output_bytes": out_bytes,
         "approx_changed_chunks": changed, "shards": shards,
+        "char_changes": chars,
         "seconds": round(time.time() - t0, 2),
     }
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-    flag = "byte-identical" if changed == 0 else f"~{changed} chunks adjusted"
+    flag = ("byte-identical" if not chars["changed"]
+            else f"{chars['edits']} edits / {chars['distinct']} char-type(s)")
     print(f"    [{key}] -> {out}  ({human_bytes(out_bytes)}, {flag}, {summary['seconds']}s)")
+    if chars["changed"]:
+        print_char_changes(chars)
     return summary
 
 
@@ -154,7 +215,10 @@ def main() -> int:
                  for k in keys if (RAW_ROOT / k).is_dir()]
         (out_root / "normalize_summary.jsonl").write_text(
             "\n".join(json.dumps(s, ensure_ascii=False) for s in index), encoding="utf-8")
-        print(f"  normalized {len(index)} dataset(s) -> {out_root}")
+        touched = [s["dataset"] for s in index if s.get("char_changes", {}).get("changed")]
+        print(f"  normalized {len(index)} dataset(s) -> {out_root}"
+              + (f"; {len(touched)} changed: {', '.join(touched)}" if touched
+                 else "; all byte-identical"))
     return 0
 
 

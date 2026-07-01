@@ -134,8 +134,11 @@ def dl_hf(key, spec, out, limit, force):
     streaming = spec.get("streaming", True)
     print(f"  [{key}] {'stream' if streaming else 'download'} {spec['hf_id']} "
           f"({spec.get('config') or 'default'}) -> {human_bytes(limit)}")
+    # script-based datasets (pile_of_law, medal, edgar, hupd, ...) need trust_remote_code
+    # on datasets>=2.16; harmless for the parquet-native ones.  spec may override.
+    load_kwargs = {"trust_remote_code": True, **spec.get("load_kwargs", {})}
     ds = load_dataset(spec["hf_id"], spec.get("config"), split=spec["split"],
-                      streaming=streaming, **spec.get("load_kwargs", {}))
+                      streaming=streaming, **load_kwargs)
     sh = Sharder(out, key)
     start = sh.rows
     rows = ds if streaming else (ds[i] for i in range(len(ds)))
