@@ -26,10 +26,12 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import re
 import sys
 import time
+from dataclasses import asdict
 
 import torch
 
@@ -296,7 +298,51 @@ def _build_parser():
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no-decompress", action="store_true",
                    help="compress only (skip slow lossless verification)")
+    p.add_argument("--target-modules", default=None,
+                   help="comma-separated LoRA target modules (default: per-modality)")
+    p.add_argument("--config", default=None, metavar="PATH",
+                   help="JSON of arg overrides applied as defaults (explicit CLI flags still win)")
+    p.add_argument("--json", default=None, metavar="PATH",
+                   help="also write {args, config, results} as JSON to PATH")
     return p
+
+
+def _coerce(value, action):
+    """Coerce a JSON config value to an argparse action's declared type."""
+    if value is None:
+        return None
+    if action.nargs == 0:                     # store_true / store_false -> bool
+        return bool(value)
+    if action.type is not None:               # int / float / ... value args
+        return action.type(value)
+    return value                              # str / choices: leave as-is
+
+
+def _apply_config_defaults(parser: argparse.ArgumentParser, argv) -> None:
+    """Overlay a --config JSON file as parser defaults.
+
+    Precedence becomes: hardcoded defaults < --config file < explicit CLI flags,
+    so the same flat schema drives both a manual run and the sweep harness.
+
+    Every key must name a real option and is coerced to that option's type, so a
+    typo or a stringified number fails loudly here instead of silently
+    misconfiguring a whole sweep.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config")
+    known, _ = pre.parse_known_args(argv)
+    if not known.config:
+        return
+    with open(known.config, encoding="utf-8") as f:
+        overrides = json.load(f)
+    actions = {a.dest: a for a in parser._actions if a.dest != "help"}
+    clean = {}
+    for key, value in overrides.items():
+        if key not in actions:
+            parser.error(f"--config {known.config}: unknown key {key!r} "
+                         f"(not an eval_online option)")
+        clean[key] = _coerce(value, actions[key])
+    parser.set_defaults(**clean)
 
 
 def _tokenizer_tag(model_path: str) -> str:
@@ -344,7 +390,9 @@ def main():
     except Exception:
         pass
 
-    args = _build_parser().parse_args()
+    parser = _build_parser()
+    _apply_config_defaults(parser, sys.argv[1:])
+    args = parser.parse_args()
     if args.model is None:
         args.model = DEFAULT_MODEL[args.modality]
     if args.data is None:
@@ -354,8 +402,10 @@ def main():
     ensure_deterministic()
     device = torch.device(args.device)
 
+    targets = (args.target_modules.split(",") if args.target_modules
+               else DEFAULT_TARGETS[args.modality])
     cfg = OnlineLearningConfig(
-        target_modules=DEFAULT_TARGETS[args.modality],
+        target_modules=targets,
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
@@ -372,6 +422,13 @@ def main():
     modes = ["static", "online"] if args.mode == "both" else [args.mode]
     results = [_run_mode(m, args, device, cfg) for m in modes]
     _print_comparison(results, args.modality)
+
+    if args.json:
+        os.makedirs(os.path.dirname(os.path.abspath(args.json)), exist_ok=True)
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump({"args": vars(args), "config": asdict(cfg), "results": results},
+                      f, indent=2, ensure_ascii=False)
+        print(f"  wrote {args.json}")
 
 
 if __name__ == "__main__":

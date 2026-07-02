@@ -1,0 +1,25 @@
+{
+  "group_name": "text_stage1",
+  "note": "Stage-1 coarse hyperparameter search on legal text (Qwen2.5-0.5B). Compress-only, recent-only. Tune on ONE dev dataset; the winner is later confirmed across all datasets. chunk_size fixed at 2048 here except for a 2-way probe; refine after.",
+  "modality": "text",
+  "fixed": {
+    "model": "checkpoints/Qwen2.5-0.5B",
+    "data": "data/text/normalized/qwen2.5/pile_of_law_eurlex",
+    "max_bytes": 4000000,
+    "batch_chunks": 8,
+    "base_seed": 42,
+    "lora_dropout": 0.0,
+    "grad_clip": 1.0,
+    "weight_decay": 0.01,
+    "train_on_all": false,
+    "no_decompress": true
+  },
+  "grid": {
+    "chunk_size": [1024, 2048, 4096],
+    "train_interval": [4, 8, 16],
+    "epochs_per_train": [1, 2, 3],
+    "lr": [3e-05, 1e-04, 3e-04],
+    "lora_r": [8, 16, 32],
+    "target_modules": ["q_proj,k_proj,v_proj,o_proj"]
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "group_name": "text_scaling",
+  "note": "Stage-2 amortization curve: FIX the Stage-1 winner, sweep stream size only. mode defaults to both, so agg gives the online-vs-static crossover. Replace 'fixed' with your best_config.json hyperparameters (or use the one-liner in RUNBOOK.md). Add 256000000 / 1000000000 for the final plateau point.",
+  "modality": "text",
+  "fixed": {
+    "model": "checkpoints/Qwen2.5-0.5B",
+    "data": "data/text/normalized/qwen2.5/pile_of_law_eurlex",
+    "chunk_size": 2048,
+    "train_interval": 8,
+    "epochs_per_train": 2,
+    "lr": 1e-04,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "target_modules": "q_proj,k_proj,v_proj,o_proj",
+    "batch_chunks": 8,
+    "base_seed": 42,
+    "lora_dropout": 0.0,
+    "grad_clip": 1.0,
+    "weight_decay": 0.01,
+    "train_on_all": false,
+    "no_decompress": true
+  },
+  "grid": {
+    "max_bytes": [1000000, 4000000, 16000000, 64000000, 256000000]
+  }
+}
