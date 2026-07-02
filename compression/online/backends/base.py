@@ -68,11 +68,24 @@ class OnlineBackend(ABC):
 
     @abstractmethod
     def from_chunks(self, chunks: List[ChunkUnit]) -> Any:
-        ...
+        """Canonical decoded payload (string for text, blob list for byte media).
+
+        This is the object the integrity check sizes; ``reconstruct`` turns it
+        into the presentation medium.
+        """
 
     @abstractmethod
     def raw_size_bytes(self, raw: Any) -> int:
         """Size of the original data in bytes (for ratio + integrity check)."""
+
+    def reconstruct(self, canonical: Any, framing: bytes) -> Any:
+        """Rebuild the presentation medium from the canonical payload + framing.
+
+        Default: identity — text needs no framing, the string *is* the medium.
+        Byte media (image/audio) override this to retile / regroup decoded blobs
+        into full images / per-clip audio using the compact ``framing`` blob.
+        """
+        return canonical
 
     # ------------------------------------------------------------------
     # Interval encode / decode  (bridges to the compressor's signature)

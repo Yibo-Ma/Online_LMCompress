@@ -295,6 +295,75 @@ def read_download_status(modality_root: Path) -> Dict:
 
 
 # --------------------------------------------------------------------------
+# Shared CLI + run loop for the per-modality downloaders
+# --------------------------------------------------------------------------
+
+def run_download_cli(modality: str, dataset_root: Path, status_root: Path,
+                     datasets: Dict, handlers: Dict, default_limit,
+                     limit_kind: str = "count") -> int:
+    """Argument parsing + the download loop shared by download_{text,image,audio}.py.
+
+    Each handler is called as ``handler(key, spec, out_dir, limit)`` and writes into
+    ``out_dir``; any exception is caught and the dataset marked FAILED.  ``limit_kind``
+    is ``"count"`` (an int, e.g. images/clips) or ``"bytes"`` (``parse_size``, e.g. 20MB).
+    Writes ``_download_status.json`` under ``status_root`` and prints a one-line summary.
+    """
+    import argparse
+
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+    unit = "bytes, e.g. 20MB" if limit_kind == "bytes" else "items"
+    p = argparse.ArgumentParser(description=f"Download {modality.upper()} datasets -> {dataset_root}")
+    p.add_argument("--dataset", nargs="*", help="dataset key(s) to download")
+    p.add_argument("--all", action="store_true", help="download every dataset")
+    p.add_argument("--limit", default=None, help=f"cap per dataset ({unit})")
+    p.add_argument("--list", action="store_true", help="list datasets and exit")
+    p.add_argument("--force", action="store_true", help="write even into a dir this tool did not create")
+    p.add_argument("--no-mirror", action="store_true", help="use huggingface.co instead of hf-mirror")
+    p.add_argument("--hf-endpoint", default=None, help="force a specific HF endpoint URL")
+    args = p.parse_args()
+
+    if args.list:
+        for k, s in datasets.items():
+            print(f"  {k:<20} gain={s.get('gain', '?'):<5} {s['kind']:<15} {s.get('license', '')}")
+        return 0
+
+    print(f"HF endpoint: {setup_hf_endpoint(use_mirror=not args.no_mirror, endpoint=args.hf_endpoint)}")
+    if args.limit is None:
+        limit = default_limit
+    else:
+        limit = parse_size(args.limit) if limit_kind == "bytes" else int(args.limit)
+
+    keys = list(datasets) if args.all else (args.dataset or [])
+    if not keys:
+        p.error("specify --dataset KEY..., --all, or --list")
+
+    ok, failed, skipped = [], [], []
+    for k in keys:
+        spec = datasets.get(k)
+        if spec is None:
+            print(f"  [{k}] unknown — see --list"); failed.append(k); continue
+        out = Path(dataset_root) / k
+        if not external_guard(out, args.force):
+            skipped.append(k); continue
+        try:
+            handlers[spec["kind"]](k, spec, out, limit)
+            ok.append(k)
+        except Exception as e:
+            print(f"  [{k}] FAILED: {type(e).__name__}: {str(e)[:140]}")
+            failed.append(k)
+
+    write_download_status(status_root, ok, failed, skipped)
+    print(f"\n{modality.upper()}: {len(ok)} ok"
+          + (f", {len(failed)} FAILED: {', '.join(failed)}" if failed else "")
+          + (f", {len(skipped)} skipped: {', '.join(skipped)}" if skipped else ""))
+    return 1 if failed else 0
+
+
+# --------------------------------------------------------------------------
 # Safety + archive helpers (shared by the three downloaders)
 # --------------------------------------------------------------------------
 

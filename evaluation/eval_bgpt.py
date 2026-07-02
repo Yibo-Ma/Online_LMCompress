@@ -2,11 +2,11 @@
 
 Usage examples
 --------------
-# Image (clic2024 BMP files)
+# Image (a directory of images — any format PIL reads)
 python evaluation/eval_bgpt.py \\
     --modality image \\
-    --dataset  datasets/clic2024/bmp \\
-    --model    pretrained/bgpt/weights-image.pth \\
+    --dataset  data/image/clic2024 \\
+    --model    checkpoints/bgpt/weights-image.pth \\
     --n-samples 100 \\
     --device cuda:0 \\
     --output results/bgpt_image.csv
@@ -14,8 +14,8 @@ python evaluation/eval_bgpt.py \\
 # Audio (peoples_speech — pass the dataset directory; pd.read_parquet reads all parquets inside)
 python evaluation/eval_bgpt.py \\
     --modality audio \\
-    --dataset  datasets/peoples_speech \\
-    --model    pretrained/bgpt/weights-audio.pth \\
+    --dataset  data/audio/peoples_speech \\
+    --model    checkpoints/bgpt/weights-audio.pth \\
     --n-samples 50 \\
     --device cuda:0,cuda:1 \\
     --save-compressed results/compressed \\
@@ -27,7 +27,7 @@ python evaluation/eval_bgpt.py --modality image ... --no-decompress
 # New dataset: register a loader in utils/img_utils.py or utils/audio_utils.py
 """
 from __future__ import annotations
-from transformers import GPT2Config
+
 import argparse
 import os
 import sys
@@ -36,6 +36,7 @@ from collections import defaultdict
 from typing import List, Optional
 
 import torch
+from transformers import GPT2Config
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -57,6 +58,7 @@ from utils.bgpt_codec_utils import pad_input_for_bgpt, bytes_to_padded_tokens
 from compression.bgpt_compressor import BGPTCompressor
 from bgpt.utils import bGPTLMHeadModel
 from bgpt.config import BYTE_NUM_LAYERS, HIDDEN_SIZE, PATCH_NUM_LAYERS, PATCH_SIZE
+
 PATCH_LENGTH = 512
 
 

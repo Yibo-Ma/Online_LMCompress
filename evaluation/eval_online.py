@@ -77,12 +77,17 @@ def _synthetic_pcm_seg(n_bytes: int):
 
 
 def _load_raw(modality: str, path: str, args):
-    """Return ``(raw, content_units)``.
+    """Return ``(raw, content_units, framing, reference)``.
 
     ``raw`` is what the compressor codes (str for text, list[bytes] blobs for
     image/audio).  ``content_units`` is the *original* content count for the
     content-relative rate: utf-8 bytes (text), sub-pixels H*W*3 (image), or 8 kHz
     samples (audio) — as opposed to the coded BMP/WAV bytes that ``bpb`` uses.
+
+    ``framing`` is the compact blob stored in the archive so decompression can
+    rebuild the whole medium from decoded chunks (empty for text).  ``reference``
+    is the content-level ground truth the round-trip checks against: the exact
+    string (text), per-image pixel bytes (image), or per-clip PCM samples (audio).
     """
     if modality == "text":
         # A file is read directly; a directory is treated as a dataset folder and
@@ -98,33 +103,39 @@ def _load_raw(modality: str, path: str, args):
         if args.max_bytes is not None:
             raw = raw[:args.max_bytes]
         text = raw.decode("utf-8", errors="ignore")
-        return text, len(text.encode("utf-8"))
+        return text, len(text.encode("utf-8")), b"", text
 
     if modality == "image":
         from PIL import Image
-        from utils.img_utils import patchify_image, _load_image_dir
+        from utils.img_utils import (patchify_image, _load_image_dir,
+                                      serialize_image_framing)
 
         # A directory yields several images (first --image-count, sorted) that are
         # concatenated into one online stream; a single file keeps prior behavior.
         files = _load_image_dir(path, args.image_count) if os.path.isdir(path) else [path]
 
-        blobs, subpixels = [], 0
+        blobs, subpixels, sizes, reference = [], 0, [], []
         for fp in files:
             img = Image.open(fp).convert("RGB")
             if args.image_crop:
                 c = args.image_crop
                 img = img.crop((0, 0, min(c, img.width), min(c, img.height)))
             subpixels += img.width * img.height * 3        # original content, before 32-grid padding
+            sizes.append((img.width, img.height))
+            reference.append(img.tobytes())                # pixel-level round-trip reference
             patches, _meta = patchify_image(img, patch_size=args.image_px)
             blobs.extend(p.data for p in patches)
-        return blobs, subpixels
+        framing = serialize_image_framing(args.image_px, sizes)
+        return blobs, subpixels, framing, reference
 
     if modality == "audio":
-        from utils.audio_utils import audio_to_pydub_seg, chunk_pydub_audio
+        from utils.audio_utils import (audio_to_pydub_seg, chunk_pydub_audio,
+                                        serialize_audio_framing,
+                                        reassemble_pcm_from_blobs)
 
         if path == "synthetic":
-            blobs = chunk_pydub_audio(_synthetic_pcm_seg(args.max_bytes or 8192),
-                                      chunk_ms=args.chunk_ms)
+            clips = [chunk_pydub_audio(_synthetic_pcm_seg(args.max_bytes or 8192),
+                                       chunk_ms=args.chunk_ms)]
         elif os.path.isdir(path) or path.endswith(".parquet"):
             # A registered audio dataset (e.g. People's Speech parquet): take the
             # first --audio-clips clips and chunk EACH clip independently, then
@@ -133,13 +144,17 @@ def _load_raw(modality: str, path: str, args):
             # per-clip chunking matches base's chunk_audio_for_compression.
             from utils.audio_utils import load_audio_samples
             samples = load_audio_samples(path, n=args.audio_clips)
-            blobs = []
-            for s in samples[:args.audio_clips]:
-                blobs.extend(chunk_pydub_audio(audio_to_pydub_seg(s), chunk_ms=args.chunk_ms))
+            clips = [chunk_pydub_audio(audio_to_pydub_seg(s), chunk_ms=args.chunk_ms)
+                     for s in samples[:args.audio_clips]]
         else:
-            blobs = chunk_pydub_audio(audio_to_pydub_seg(path), chunk_ms=args.chunk_ms)
+            clips = [chunk_pydub_audio(audio_to_pydub_seg(path), chunk_ms=args.chunk_ms)]
+
+        blobs = [b for clip in clips for b in clip]
+        framing = serialize_audio_framing([len(c) for c in clips])
+        reference = reassemble_pcm_from_blobs(blobs, framing)   # per-clip PCM, sample-level
         # 8 kHz / 8-bit / mono WAV chunks: 1 PCM byte == 1 sample, minus one header per chunk
-        return blobs, sum(len(b) - _WAV_HEADER_BYTES for b in blobs)
+        content_units = sum(len(b) - _WAV_HEADER_BYTES for b in blobs)
+        return blobs, content_units, framing, reference
 
     raise NotImplementedError(modality)
 
@@ -165,8 +180,16 @@ def _build_backend(modality: str, model_path: str, device, args):
 # One mode (static | online), with fresh-reload decode verification
 # ---------------------------------------------------------------------------
 
+def _media_equal(modality: str, recovered, reference) -> bool:
+    """Content-level round-trip check: pixel bytes per image, PCM samples per clip
+    (WAV header stripped), or the exact string for text."""
+    if modality == "image":
+        return [im.tobytes() for im in recovered] == reference
+    return recovered == reference
+
+
 def _run_mode(mode: str, args, device, cfg: OnlineLearningConfig):
-    raw, content_units = _load_raw(args.modality, args.data, args)
+    raw, content_units, framing, reference = _load_raw(args.modality, args.data, args)
     orig_bytes = _raw_size(args.modality, raw)
     n_units = 1 if args.modality == "text" else len(raw)
     print(f"\n{'=' * 64}\n  {mode.upper()}  ({args.modality})\n{'=' * 64}")
@@ -184,7 +207,7 @@ def _run_mode(mode: str, args, device, cfg: OnlineLearningConfig):
     comp = make_compressor()
     comp.setup()
     sync(device); t0 = time.time()
-    archive = comp.compress(raw)
+    archive = comp.compress(raw, framing)
     sync(device); comp_s = time.time() - t0
 
     comp_bytes = len(archive)
@@ -208,7 +231,7 @@ def _run_mode(mode: str, args, device, cfg: OnlineLearningConfig):
         recovered = comp2.decompress(archive)
         sync(device); decomp_s = time.time() - t0
 
-        ok = (recovered == raw)
+        ok = _media_equal(args.modality, recovered, reference)
         print(f"  round-trip: {'OK' if ok else 'FAILED'} | {decomp_s:.2f}s")
         if not ok:
             raise AssertionError(f"{mode} round-trip FAILED — not lossless!")

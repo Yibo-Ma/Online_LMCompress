@@ -1,8 +1,10 @@
 """_LLMTokenBackend: shared machinery for any autoregressive causal-LM backend.
 
-Text and audio (LLM-on-bytes) differ only in how raw data maps to/from token
-ids.  Everything else — fp32 load, deterministic LoRA, the LLMCompressor wrapper,
-interval encode/decode, and the next-token-CE training defaults — lives here.
+Currently only TextBackend builds on this (paper §3.4); image and audio use the
+byte-level bGPT backend instead (see _BGPTByteBackend).  A causal-LM subclass
+differs only in how raw data maps to/from token ids — everything else (fp32 load,
+deterministic LoRA, the LLMCompressor wrapper, interval encode/decode, and the
+next-token-CE training defaults) lives here.
 
 Subclasses must implement: to_chunks / from_chunks / raw_size_bytes / modality /
 model_fingerprint, and set ``self.pad_id`` (a valid token id used only for

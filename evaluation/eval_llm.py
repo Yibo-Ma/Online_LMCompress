@@ -2,21 +2,21 @@
 
 Usage examples
 --------------
-# enwiki (HF dataset saved to disk, 'text' field)
+# enwik8 (a directory of part-*.txt shards, or any registered text loader)
 python evaluation/eval_llm.py \\
-    --dataset  datasets/enwiki \\
-    --model    pretrained/SmolLM2-135M \\
+    --dataset  data/text/raw/enwik8 \\
+    --model    checkpoints/Qwen2.5-0.5B \\
     --n-docs 500 \\
     --device cuda:0 \\
-    --output results/llm_enwiki.csv
+    --output results/llm_enwik8.csv
 
-# cosmopedia
+# medal
 python evaluation/eval_llm.py \\
-    --dataset  datasets/cosmopedia-100k \\
-    --model    pretrained/SmolLM2-135M \\
+    --dataset  data/text/raw/medal \\
+    --model    checkpoints/Qwen2.5-0.5B \\
     --n-docs 100 \\
     --device cuda:0,cuda:1 \\
-    --output results/llm_cosmopedia.csv
+    --output results/llm_medal.csv
 
 # Compression only (skip decode), save compressed artefacts
 python evaluation/eval_llm.py --dataset ... --no-decompress --save-compressed results/comp
@@ -25,14 +25,16 @@ python evaluation/eval_llm.py --dataset ... --no-decompress --save-compressed re
 """
 
 from __future__ import annotations
-from transformers import AutoModelForCausalLM, AutoTokenizer
+
 import argparse
 import os
 import sys
 import time
 from collections import defaultdict
 from typing import Dict, List, Optional
+
 import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

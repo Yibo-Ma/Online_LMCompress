@@ -26,6 +26,10 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 
+from utils.online_archive import encode_varint, decode_varint
+
+WAV_HEADER_BYTES = 44          # canonical PCM WAV header written by chunk_pydub_audio
+
 
 # ---------------------------------------------------------------------------
 # Loader registry
@@ -245,3 +249,45 @@ def chunk_pydub_audio(seg, chunk_ms: int = 1000) -> List[bytes]:
         seg[start:start + chunk_ms].export(out, format='wav')
         chunks.append(out.getvalue())
     return chunks
+
+
+# ---------------------------------------------------------------------------
+# Framing: the minimal metadata to regroup WAV chunk-blobs back into clips
+# ---------------------------------------------------------------------------
+# The stream is a flat list of WAV chunk-blobs; storing each clip's chunk count
+# is enough to split it back and concatenate every clip's PCM payload (header
+# stripped) into one sample-exact byte string per clip.  A varint per clip.
+
+def serialize_audio_framing(chunk_counts: Sequence[int]) -> bytes:
+    """Pack the per-clip chunk counts into a compact blob."""
+    out = bytearray()
+    out += encode_varint(len(chunk_counts))
+    for c in chunk_counts:
+        out += encode_varint(int(c))
+    return bytes(out)
+
+
+def reassemble_pcm_from_blobs(
+    blobs: Sequence[bytes], framing: bytes
+) -> List[bytes]:
+    """Inverse of chunk+concat: split the flat WAV chunk-blob list back per clip
+    and concatenate each clip's PCM payload (44-byte header stripped) into one
+    sample-exact byte string per clip."""
+    n_clips, off = decode_varint(framing, 0)
+
+    clips: List[bytes] = []
+    cursor = 0
+    for _ in range(n_clips):
+        count, off = decode_varint(framing, off)
+        clip_blobs = blobs[cursor:cursor + count]
+        if len(clip_blobs) != count:
+            raise ValueError(
+                f"Audio framing expects {count} chunks for a clip but only "
+                f"{len(clip_blobs)} blobs remain.")
+        cursor += count
+        clips.append(b"".join(b[WAV_HEADER_BYTES:] for b in clip_blobs))
+
+    if cursor != len(blobs):
+        raise ValueError(
+            f"Audio framing consumed {cursor} of {len(blobs)} chunk-blobs.")
+    return clips

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Download TEXT datasets into ``data/text/raw/<key>/`` (part-*.txt + manifest.jsonl).
 
-Only license-clean, verified-downloadable datasets are included.  Direct-URL /
-GitHub sources need **no Hugging Face at all**; HF sources work through hf-mirror.
-Run from the repo root.
+Only license-clean, verified-downloadable datasets.  Direct-URL / GitHub sources need
+no Hugging Face; HF sources work through hf-mirror.  Datasets whose loading *script*
+hardcodes huggingface.co URLs (pile-of-law, edgar) are fetched straight from the mirror
+as ``.jsonl(.xz)`` via the ``hf_lines`` handler.  Run from the repo root.
 
     python scripts/download_text.py --list
     python scripts/download_text.py --dataset enwik9 --limit 20MB
-    python scripts/download_text.py --dataset pile_of_law_eurlex --limit 50MB
+    python scripts/download_text.py --dataset pile_of_law_eurlex medal --limit 50MB
     python scripts/download_text.py --all
 
 ``--limit`` = bytes per dataset.  Resumable / append-extend; refuses to overwrite
@@ -15,20 +16,16 @@ externally-provided dirs (no _progress.json) unless ``--force``.
 """
 from __future__ import annotations
 
-import argparse
-import io
 import json
 import os
 import sys
 import tarfile
-import zipfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (  # noqa: E402
-    DATA_ROOT, external_guard, http_download, human_bytes, parse_size,
-    read_zip_member, load_progress, save_progress, setup_hf_endpoint,
-    stream_hf_lines, write_download_status,
+    DATA_ROOT, http_download, human_bytes, load_progress, read_zip_member,
+    run_download_cli, save_progress, stream_hf_lines,
 )
 
 RAW = DATA_ROOT / "text" / "raw"
@@ -39,7 +36,6 @@ LOGHUB_SYSTEMS = ["HDFS", "BGL", "Thunderbird", "Spirit", "Windows", "Linux",
                   "Android", "Apache", "OpenStack", "HPC", "Hadoop", "Zookeeper",
                   "Mac", "OpenSSH", "Proxifier", "HealthApp"]
 
-# key -> spec.  license/gain are documentation (shown by --list).
 DATASETS = {
     # --- direct URL / GitHub (no HF needed) ---
     "enwik8":  dict(kind="url_zip", url="http://mattmahoney.net/dc/enwik8.zip",
@@ -59,24 +55,22 @@ DATASETS = {
     "enron":   dict(kind="url_tar_text",
                     url="https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz",
                     license="public", gain="med"),
-    # --- HF (work through hf-mirror) ---
+    # --- HF straight-from-mirror .jsonl(.xz) (loading script hardcodes hf.co) ---
     "pile_of_law_eurlex": dict(kind="hf_lines", repo="pile-of-law/pile-of-law",
                                files=["data/train.eurlex.jsonl.xz"], fields=["text"],
-                               license="CC-BY-NC-SA (non-commercial)", gain="high",
-                               note="direct mirror .jsonl.xz — the loading script hardcodes hf.co"),
+                               license="CC-BY-NC-SA (non-commercial)", gain="high"),
     "atticus_contracts":  dict(kind="hf_lines", repo="pile-of-law/pile-of-law",
                                files=[f"data/train.atticus_contracts.{i}.jsonl.xz" for i in range(5)],
-                               fields=["text"], license="CC-BY 4.0", gain="high",
-                               note="direct mirror .jsonl.xz shards — the loading script hardcodes hf.co"),
+                               fields=["text"], license="CC-BY 4.0", gain="high"),
+    "edgar_corpus":       dict(kind="hf_lines", repo="eloukas/edgar-corpus",
+                               files=["2020/train.jsonl"], fields=None,
+                               license="public (SEC)", gain="high"),
+    # --- HF via load_dataset (work through hf-mirror) ---
     "codesearchnet":      dict(kind="hf", hf_id="code_search_net", config="python",
                                split="train", fields=["whole_func_string"],
                                license="MIT (code: per-file OSS)", gain="high"),
     "medal":              dict(kind="hf", hf_id="McGill-NLP/medal", config=None, split="train",
                                fields=["text"], license="MIT + NLM terms", gain="med"),
-    "edgar_corpus":       dict(kind="hf_lines", repo="eloukas/edgar-corpus",
-                               files=["2020/train.jsonl"], fields=None,
-                               license="public (SEC)", gain="high",
-                               note="direct mirror .jsonl — faster than the loading script"),
     "hupd":               dict(kind="hf", hf_id="HUPD/hupd", config="sample", split="train",
                                fields=["title", "abstract", "claims", "background", "description"],
                                streaming=False, load_kwargs=dict(trust_remote_code=True, uniform_split=True),
@@ -119,10 +113,6 @@ class Sharder:
         save_progress(self.out, rows=self.rows, bytes=self.bytes, shard=self.shard, **prog)
 
 
-# ---------------------------------------------------------------------------
-# Handlers
-# ---------------------------------------------------------------------------
-
 def _row_text(row: dict, fields) -> str:
     if fields:
         parts = [str(row[f]) for f in fields if row.get(f) not in (None, "")]
@@ -131,7 +121,12 @@ def _row_text(row: dict, fields) -> str:
     return "\n".join(parts)
 
 
-def dl_hf(key, spec, out, limit, force):
+# ---------------------------------------------------------------------------
+# Handlers — each is handler(key, spec, out, limit)
+# ---------------------------------------------------------------------------
+
+def dl_hf(key, spec, out, limit):
+    """Stream (or download) an HF dataset via load_dataset, sharding rows up to ``limit`` bytes."""
     from datasets import load_dataset
     prog = load_progress(out)
     if prog.get("bytes", 0) >= limit:
@@ -139,8 +134,8 @@ def dl_hf(key, spec, out, limit, force):
     streaming = spec.get("streaming", True)
     print(f"  [{key}] {'stream' if streaming else 'download'} {spec['hf_id']} "
           f"({spec.get('config') or 'default'}) -> {human_bytes(limit)}")
-    # script-based datasets (pile_of_law, medal, edgar, hupd, ...) need trust_remote_code
-    # on datasets>=2.16; harmless for the parquet-native ones.  spec may override.
+    # script-based datasets (medal, hupd, ...) need trust_remote_code on datasets>=2.16;
+    # harmless for the parquet-native ones.  spec may override.
     load_kwargs = {"trust_remote_code": True, **spec.get("load_kwargs", {})}
     ds = load_dataset(spec["hf_id"], spec.get("config"), split=spec["split"],
                       streaming=streaming, **load_kwargs)
@@ -161,15 +156,15 @@ def dl_hf(key, spec, out, limit, force):
     print(f"  [{key}] -> {out}  ({human_bytes(sh.bytes)}, {sh.rows} docs)")
     if sh.bytes == 0:
         raise RuntimeError(
-            f"got 0 docs — this dataset's loader likely fetches from huggingface.co "
-            f"directly (bypassing the mirror), so it can't work in a mirror-only env")
+            "got 0 docs — this dataset's loader likely fetches from huggingface.co "
+            "directly (bypassing the mirror), so it can't work in a mirror-only env")
 
 
-def dl_hf_lines(key, spec, out, limit, force):
+def dl_hf_lines(key, spec, out, limit):
     """Fetch line-based HF data files (.jsonl / .jsonl.gz / .jsonl.xz) straight from the
     mirror, streaming + decompressing so ``--limit`` caps the download.  Bypasses the
-    dataset's loading script, which hardcodes ``huggingface.co`` URLs (``HF_ENDPOINT``
-    can't rewrite those, so ``load_dataset`` fails / returns empty in a mirror-only env)."""
+    dataset's loading script, which hardcodes huggingface.co URLs (HF_ENDPOINT can't
+    rewrite those, so load_dataset fails / returns empty in a mirror-only env)."""
     endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
     out.mkdir(parents=True, exist_ok=True)
     if load_progress(out).get("bytes", 0) >= limit:
@@ -205,7 +200,8 @@ def dl_hf_lines(key, spec, out, limit, force):
         raise RuntimeError("got 0 docs — the mirror data-file URL was unreachable")
 
 
-def dl_url_zip(key, spec, out, limit, force):
+def dl_url_zip(key, spec, out, limit):
+    """Download a .zip and keep the first ``limit`` bytes of one member as part-00000.txt."""
     out.mkdir(parents=True, exist_ok=True)
     src = out / ("_source" + Path(spec["url"]).suffix)
     print(f"  [{key}] {spec['url']}")
@@ -216,8 +212,9 @@ def dl_url_zip(key, spec, out, limit, force):
     print(f"  [{key}] -> {out}  ({human_bytes(len(raw))})")
 
 
-def dl_github_members(key, spec, out, limit, force):
-    sh_total = 0
+def dl_github_members(key, spec, out, limit):
+    """Download each named .zip member from a GitHub raw base into its own shard."""
+    total = 0
     out.mkdir(parents=True, exist_ok=True)
     with open(out / "manifest.jsonl", "w", encoding="utf-8") as man:
         for i, m in enumerate(spec["members"]):
@@ -227,12 +224,13 @@ def dl_github_members(key, spec, out, limit, force):
             data = read_zip_member(z, None)
             (out / f"part-{i:05d}.txt").write_bytes(data)
             man.write(json.dumps({"dataset": key, "member": m, "shard": i, "bytes": len(data)}) + "\n")
-            z.unlink(); sh_total += len(data)
-    save_progress(out, bytes=sh_total, members=spec["members"], gain=spec.get("gain"))
-    print(f"  [{key}] -> {out}  ({human_bytes(sh_total)}, {len(spec['members'])} members)")
+            z.unlink(); total += len(data)
+    save_progress(out, bytes=total, members=spec["members"], gain=spec.get("gain"))
+    print(f"  [{key}] -> {out}  ({human_bytes(total)}, {len(spec['members'])} members)")
 
 
-def dl_github_logs(key, spec, out, limit, force):
+def dl_github_logs(key, spec, out, limit):
+    """Fetch each system's 2k-line log sample from a GitHub raw base (skips 404s)."""
     sh = Sharder(out, key)
     done = set(load_progress(out).get("systems", []))
     for sysname in spec["systems"]:
@@ -250,7 +248,8 @@ def dl_github_logs(key, spec, out, limit, force):
     print(f"  [{key}] -> {out}  ({human_bytes(sh.bytes)}, {len(done)} systems)")
 
 
-def dl_url_tar_text(key, spec, out, limit, force):
+def dl_url_tar_text(key, spec, out, limit):
+    """Download a large tar of text files, then shard members up to ``limit`` bytes."""
     out.mkdir(parents=True, exist_ok=True)
     src = out / ("_source" + "".join(Path(spec["url"]).suffixes[-2:]))
     print(f"  [{key}] {spec['url']} (large; downloads then extracts to {human_bytes(limit)})")
@@ -280,54 +279,9 @@ HANDLERS = {"hf": dl_hf, "hf_lines": dl_hf_lines, "url_zip": dl_url_zip,
             "url_tar_text": dl_url_tar_text}
 
 
-# ---------------------------------------------------------------------------
-
 def main() -> int:
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-    p = argparse.ArgumentParser(description="Download TEXT datasets -> data/text/raw/")
-    p.add_argument("--dataset", nargs="*", help="dataset key(s)")
-    p.add_argument("--all", action="store_true")
-    p.add_argument("--limit", default=None, help="bytes per dataset (e.g. 20MB)")
-    p.add_argument("--list", action="store_true")
-    p.add_argument("--force", action="store_true")
-    p.add_argument("--no-mirror", action="store_true")
-    p.add_argument("--hf-endpoint", default=None)
-    args = p.parse_args()
-
-    if args.list:
-        for k, s in DATASETS.items():
-            print(f"  {k:<20} gain={s.get('gain','?'):<4} {s['kind']:<14} {s.get('license','')}")
-        return 0
-
-    ep = setup_hf_endpoint(use_mirror=not args.no_mirror, endpoint=args.hf_endpoint)
-    print(f"HF endpoint: {ep}")
-    limit = parse_size(args.limit) if args.limit else DEFAULT_LIMIT
-
-    keys = list(DATASETS) if args.all else (args.dataset or [])
-    if not keys:
-        p.error("specify --dataset KEY..., --all, or --list")
-    ok, failed, skipped = [], [], []
-    for k in keys:
-        spec = DATASETS.get(k)
-        if spec is None:
-            print(f"  [{k}] unknown — see --list"); failed.append(k); continue
-        out = RAW / k
-        if not external_guard(out, args.force):
-            skipped.append(k); continue
-        try:
-            HANDLERS[spec["kind"]](k, spec, out, limit, args.force)
-            ok.append(k)
-        except Exception as e:
-            print(f"  [{k}] FAILED: {type(e).__name__}: {str(e)[:140]}")
-            failed.append(k)
-    write_download_status(RAW.parent, ok, failed, skipped)
-    print(f"\nTEXT: {len(ok)} ok"
-          + (f", {len(failed)} FAILED: {', '.join(failed)}" if failed else "")
-          + (f", {len(skipped)} skipped: {', '.join(skipped)}" if skipped else ""))
-    return 1 if failed else 0
+    return run_download_cli("text", RAW, RAW.parent, DATASETS, HANDLERS,
+                            default_limit=DEFAULT_LIMIT, limit_kind="bytes")
 
 
 if __name__ == "__main__":

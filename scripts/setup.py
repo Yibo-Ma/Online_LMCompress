@@ -15,11 +15,13 @@ did not download at the end.  Restrict with e.g. ``--text-datasets enwik9 medal`
 
 Common flags (any phase): --dry-run, --pip, --no-mirror, --hf-endpoint, --keep-going.
 
-  models   qwen2.5-0.5b, qwen2.5-7b, qwen3-1.7b, qwen3-4b, qwen3-8b, bgpt  (~50 GB)
-  text     all  (enwik8/9, text8, silesia, loghub, enron, pile_of_law_eurlex,
-                 atticus_contracts, codesearchnet, medal, edgar_corpus, hupd)
-  image    all  (kodak, div2k, dtd, eurosat)
-  audio    all  (librispeech, ljspeech, maestro [~120GB!], peoples_speech)
+  models   qwen2.5-0.5b, qwen2.5-7b, qwen3-1.7b, qwen3-4b, qwen3-8b, bgpt  (~50 GB —
+           restrict with e.g. --models qwen2.5-0.5b qwen3-1.7b bgpt)
+  text     enwik8/9, text8, silesia, loghub, enron, pile_of_law_eurlex,
+           atticus_contracts, edgar_corpus, codesearchnet, medal, hupd
+  image    kodak, div2k, clic2024, usc_textures, dtd, eurosat, cifar10, oxford_pet
+  audio    librispeech, ljspeech, maestro [~120GB!], peoples_speech, nsynth,
+           speech_commands, esc50
 """
 from __future__ import annotations
 

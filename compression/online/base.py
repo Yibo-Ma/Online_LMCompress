@@ -49,6 +49,7 @@ class _ChunkedCompressor(ABC):
     def _assemble_archive(
         self, role: str, settings: Dict,
         cds: List[CompressedData], total_original_bytes: int,
+        framing: bytes = b"",
     ) -> bytes:
         meta = ar.build_meta(
             role, self.backend.modality, settings,
@@ -57,13 +58,13 @@ class _ChunkedCompressor(ABC):
         return ar.build_archive(
             [cd.original_length for cd in cds],
             [cd.compressed_bytes for cd in cds],
-            total_original_bytes, meta,
+            total_original_bytes, meta, framing,
         )
 
     def _open_archive(
         self, role: str, settings: Dict, archive_bytes: bytes,
-    ) -> Tuple[int, List[CompressedData]]:
-        meta, total_ob, original_lengths, payloads = ar.parse_archive(archive_bytes)
+    ) -> Tuple[int, bytes, List[CompressedData]]:
+        meta, total_ob, framing, original_lengths, payloads = ar.parse_archive(archive_bytes)
         ar.validate_meta(
             meta, role, self.backend.modality, settings,
             self.backend.model_fingerprint(), self.device,
@@ -72,15 +73,20 @@ class _ChunkedCompressor(ABC):
             CompressedData(compressed_bytes=p, original_length=ol)
             for p, ol in zip(payloads, original_lengths)
         ]
-        return total_ob, cds
+        return total_ob, framing, cds
 
-    def _finalize(self, decoded_chunks: List[ChunkUnit], total_ob: int) -> Any:
-        raw = self.backend.from_chunks(decoded_chunks)
-        if self.backend.raw_size_bytes(raw) != total_ob:
+    def _finalize(
+        self, decoded_chunks: List[ChunkUnit], total_ob: int, framing: bytes,
+    ) -> Any:
+        # Integrity check on the canonical payload (blobs / string) — cheap and
+        # unchanged; then rebuild the presentation medium via the backend, which
+        # consumes ``framing`` (identity for text, retile/regroup for image/audio).
+        canonical = self.backend.from_chunks(decoded_chunks)
+        if self.backend.raw_size_bytes(canonical) != total_ob:
             raise ValueError(
                 "Decoded data size does not match archive metadata "
-                f"({self.backend.raw_size_bytes(raw)} != {total_ob}).")
-        return raw
+                f"({self.backend.raw_size_bytes(canonical)} != {total_ob}).")
+        return self.backend.reconstruct(canonical, framing)
 
     # ------------------------------------------------------------------
     # Public API
@@ -91,7 +97,7 @@ class _ChunkedCompressor(ABC):
         ...
 
     @abstractmethod
-    def compress(self, raw: Any) -> bytes:
+    def compress(self, raw: Any, framing: bytes = b"") -> bytes:
         ...
 
     @abstractmethod

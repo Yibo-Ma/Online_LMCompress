@@ -64,7 +64,7 @@ scripts/
   download_text.py       text  datasets -> data/text/raw/  (byte-capped, resumable)
   download_image.py      image datasets -> data/image/     (count-capped, resumable)
   download_audio.py      audio datasets -> data/audio/     (count-capped, tar streamed)
-  download_manual.py     special sources (clic2024 / chestxray14 / musdb18 / icbhi)
+  download_manual.py     special sources (chestxray14 / musdb18 / icbhi)
   normalize_text.py      tokenizer round-trip normalize: data/text/raw -> data/text/normalized/<tag>/
 data/                    text/{raw,normalized}/  image/  audio/   (git-ignored; filled by scripts)
 checkpoints/             Qwen2.5-0.5B, Qwen3-*, bgpt/weights-*.pth (git-ignored; filled by scripts)
@@ -76,12 +76,18 @@ checkpoints/             Qwen2.5-0.5B, Qwen3-*, bgpt/weights-*.pth (git-ignored;
 **hf-mirror.com** (pass `--no-mirror` or `--hf-endpoint URL` if your network prefers
 `huggingface.co`).
 
-**One command** (default models + data + normalize, all-3-modality runnable):
+**Environment** (conda-forge, one command; `nodefaults` avoids the Anaconda ToS prompt):
 
 ```bash
-conda create -n olmc -c conda-forge python=3.11 -y && conda activate olmc
-pip install torch --index-url https://download.pytorch.org/whl/cu121   # GPU; omit --index-url for CPU
-pip install -r requirements.txt   # HuggingFace libs are pinned here — see the comment in that file
+conda env create -f environment.yml     # python 3.11 + ffmpeg + pinned pip deps (see requirements.txt)
+conda activate olmc
+# GPU: torch from PyPI is CUDA-enabled on Linux; to pin a CUDA build:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+```
+
+**Then, one command for models + data + normalize** (all-3-modality runnable):
+
+```bash
 python scripts/setup.py            # add --dry-run to preview, --no-mirror to skip the mirror
 ```
 
@@ -112,16 +118,20 @@ Run from the repo root. `--mode both` runs static then online and verifies a los
 round-trip with a fresh model reload.
 
 ```bash
-# text — defaults to data/text/normalized/pile_of_law_eurlex; --data takes any dataset dir
+# text — default data is normalized/<tokenizer-tag>/pile_of_law_eurlex (tag from --model)
 python evaluation/eval_online.py --modality text  --mode both --max-bytes 80000
-python evaluation/eval_online.py --modality text  --mode both --data data/text/normalized/medal
+python evaluation/eval_online.py --modality text  --mode both --data data/text/normalized/qwen2.5/medal
 
-# image — concatenate several images into one online stream (mirrors audio)
-python evaluation/eval_online.py --modality image --mode both --data data/image/clic2024/raw --image-count 8
+# image — concatenate several images into one online stream (usc_textures = lossless TIFF texture)
+python evaluation/eval_online.py --modality image --mode both --data data/image/usc_textures --image-count 8
 
 # audio — concatenate several clips; each clip is chunked then the lists are concatenated
-python evaluation/eval_online.py --modality audio --mode both --data data/audio/peoples_speech --audio-clips 8 --chunk-ms 1000
+python evaluation/eval_online.py --modality audio --mode both --data data/audio/librispeech --audio-clips 8 --chunk-ms 1000
 ```
+
+Each run prints a comparison table with `bpb` (bits per coded byte) and a content-relative
+rate — `bpsp` per sub-pixel (image), `bps` per 8 kHz sample (audio), `bpc` per byte (text),
+the number to report — plus the static→online delta and `round-trip: OK`.
 
 Key flags: `--train-interval`, `--epochs-per-train`, `--lora-r/--lora-alpha`, `--lr`,
 `--chunk-size` (text tokens/chunk), `--image-count`, `--audio-clips`, `--chunk-ms`,

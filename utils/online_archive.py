@@ -6,9 +6,15 @@ Layout
 ------
     MAGIC | version
     varint(len(meta_json)) | meta_json
+    varint(len(framing)) | framing
     varint(total_original_bytes) | varint(num_chunks)
     per chunk: varint(original_length) varint(payload_len)
     concatenated chunk payloads
+
+``framing`` is a small, data-dependent descriptor (image sizes, audio clip
+lengths, …) the backend uses to rebuild the original medium from decoded chunks;
+it is empty for text.  It is kept out of the metadata hash on purpose — it is
+data, not a setting.
 
 ``meta_json`` carries the *role* (static/online), the *modality*, and compact
 hashes of (a) the compression settings and (b) the software+hardware
@@ -27,7 +33,7 @@ import numpy as np
 import torch
 
 ARCHIVE_MAGIC = b"OLMC"      # Online LM Compress
-ARCHIVE_VERSION = 1
+ARCHIVE_VERSION = 2          # v2 adds the framing section after the metadata block
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +158,7 @@ def build_archive(
     payloads: List[bytes],
     total_original_bytes: int,
     meta: Dict,
+    framing: bytes = b"",
 ) -> bytes:
     if len(original_lengths) != len(payloads):
         raise ValueError("original_lengths and payloads must have equal length.")
@@ -163,6 +170,9 @@ def build_archive(
     meta_bytes = json.dumps(meta or {}, sort_keys=True).encode("utf-8")
     header.extend(encode_varint(len(meta_bytes)))
     header.extend(meta_bytes)
+
+    header.extend(encode_varint(len(framing)))
+    header.extend(framing)
 
     header.extend(encode_varint(total_original_bytes))
     header.extend(encode_varint(len(original_lengths)))
@@ -178,7 +188,7 @@ def build_archive(
 
 def parse_archive(
     archive_bytes: bytes,
-) -> Tuple[Dict, int, List[int], List[bytes]]:
+) -> Tuple[Dict, int, bytes, List[int], List[bytes]]:
     if not archive_bytes.startswith(ARCHIVE_MAGIC):
         raise ValueError("Invalid archive magic.")
 
@@ -192,6 +202,10 @@ def parse_archive(
     meta = (json.loads(archive_bytes[offset:offset + meta_len].decode("utf-8"))
             if meta_len else {})
     offset += meta_len
+
+    framing_len, offset = decode_varint(archive_bytes, offset)
+    framing = bytes(archive_bytes[offset:offset + framing_len])
+    offset += framing_len
 
     total_original_bytes, offset = decode_varint(archive_bytes, offset)
     num_chunks, offset = decode_varint(archive_bytes, offset)
@@ -211,7 +225,7 @@ def parse_archive(
     if offset != len(archive_bytes):
         raise ValueError("Archive payload length / metadata mismatch.")
 
-    return meta, total_original_bytes, original_lengths, payloads
+    return meta, total_original_bytes, framing, original_lengths, payloads
 
 
 def write_archive(filename: str, archive_bytes: bytes) -> None:

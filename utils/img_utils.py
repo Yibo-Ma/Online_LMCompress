@@ -22,6 +22,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from PIL import Image
 
+from utils.online_archive import encode_varint, decode_varint
+
 
 # ---------------------------------------------------------------------------
 # Loader registry
@@ -241,3 +243,67 @@ def reassemble_image_patches(
         canvas.paste(_bmp_bytes_to_pil(patch.data).convert(
             meta.mode), (patch.x, patch.y))
     return canvas.crop((0, 0, meta.original_width, meta.original_height))
+
+
+# ---------------------------------------------------------------------------
+# Framing: the minimal metadata to rebuild whole images from patch-blobs
+# ---------------------------------------------------------------------------
+# A stream of row-major patch-blobs plus each image's (w, h) is enough: with a
+# fixed patch size, the patch count and every patch's (x, y) follow from (w, h),
+# so only the sizes need storing.  A handful of varints per image — negligible
+# against the compressed payload.
+
+def serialize_image_framing(
+    patch_px: int, sizes: Sequence[Tuple[int, int]]
+) -> bytes:
+    """Pack ``patch_px`` + per-image ``(width, height)`` into a compact blob."""
+    out = bytearray()
+    out += encode_varint(patch_px)
+    out += encode_varint(len(sizes))
+    for w, h in sizes:
+        out += encode_varint(int(w))
+        out += encode_varint(int(h))
+    return bytes(out)
+
+
+def reassemble_images_from_blobs(
+    blobs: Sequence[bytes], framing: bytes
+) -> List[Image.Image]:
+    """Inverse of patchify+concat: split the flat patch-blob list back per image
+    and retile+crop each to its original size, using only ``framing``."""
+    patch_px, off = decode_varint(framing, 0)
+    n_images, off = decode_varint(framing, off)
+
+    images: List[Image.Image] = []
+    cursor = 0
+    for _ in range(n_images):
+        w, off = decode_varint(framing, off)
+        h, off = decode_varint(framing, off)
+        cols = (w + patch_px - 1) // patch_px
+        rows = (h + patch_px - 1) // patch_px
+        count = cols * rows
+
+        patch_blobs = blobs[cursor:cursor + count]
+        if len(patch_blobs) != count:
+            raise ValueError(
+                f"Image framing expects {count} patches for a {w}x{h} image but "
+                f"only {len(patch_blobs)} blobs remain.")
+        cursor += count
+
+        patches = [
+            ImagePatch(index=idx, x=(idx % cols) * patch_px,
+                       y=(idx // cols) * patch_px,
+                       width=patch_px, height=patch_px, data=blob)
+            for idx, blob in enumerate(patch_blobs)
+        ]
+        meta = ImagePatchMeta(
+            original_width=w, original_height=h,
+            padded_width=cols * patch_px, padded_height=rows * patch_px,
+            patch_size=patch_px, mode="RGB",
+        )
+        images.append(reassemble_image_patches(patches, meta))
+
+    if cursor != len(blobs):
+        raise ValueError(
+            f"Image framing consumed {cursor} of {len(blobs)} patch-blobs.")
+    return images

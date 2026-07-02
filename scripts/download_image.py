@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Download IMAGE datasets into ``data/image/<key>/``.
+"""Download IMAGE datasets into ``data/image/<key>/`` as ``img_*.{png,tiff,...}``.
 
-Only license-clean, verified-downloadable datasets.  Direct-URL sources need no
-Hugging Face; EuroSAT streams through hf-mirror.  Run from the repo root.
+Only license-clean, verified-downloadable datasets.  Direct-URL archives (DIV2K,
+CLIC, USC-SIPI, ...) need no Hugging Face; Kodak / EuroSAT / CIFAR-10 stream through
+hf-mirror.  Run from the repo root.
 
     python scripts/download_image.py --list
     python scripts/download_image.py --dataset kodak
-    python scripts/download_image.py --dataset eurosat --limit 200
+    python scripts/download_image.py --dataset clic2024 usc_textures --limit 40
     python scripts/download_image.py --all
 
-``--limit`` = number of images per dataset.
+``--limit`` = number of images per dataset.  For lossless-compression work prefer the
+PNG/TIFF sets (kodak, div2k, clic2024, usc_textures); dtd / oxford_pet / eurosat are JPEG.
 """
 from __future__ import annotations
 
-import argparse
 import io
 import os
 import sys
@@ -21,15 +22,14 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (  # noqa: E402
-    DATA_ROOT, external_guard, extract_media, http_download, setup_hf_endpoint,
-    save_progress, write_download_status,
+    DATA_ROOT, extract_media, http_download, run_download_cli, save_progress,
 )
 
 IMG = DATA_ROOT / "image"
-DEFAULT_LIMIT = 24
 IMG_EXTS = (".png", ".bmp", ".jpg", ".jpeg", ".tif", ".tiff")
 
 DATASETS = {
+    # --- lossless PNG/TIFF (use these for compression benchmarks) ---
     "kodak": dict(kind="hf", hf_id="msdkhairi/kodak", split="train", image_key="image",
                   license="free research (benchmark)", gain="low",
                   note="24 lossless 768x512 PNGs; via HF mirror because r0k.us IP-blocks some clusters"),
@@ -39,15 +39,15 @@ DATASETS = {
                      url="https://data.vision.ee.ethz.ch/cvl/clic/professional_valid_2020.zip",
                      license="CLIC (research use)", gain="low",
                      note="CLIC professional validation — lossless PNG (the standard uncompressed benchmark)"),
-    "dtd":   dict(kind="url_zip", url="https://www.robots.ox.ac.uk/~vgg/data/dtd/download/dtd-r1.0.1.tar.gz",
-                  license="research (Oxford VGG)", gain="high"),
     "usc_textures": dict(kind="url_zip", url="https://sipi.usc.edu/database/textures.zip",
                          license="USC-SIPI (research use)", gain="high",
                          note="USC-SIPI texture volume: lossless TIFF (Brodatz); classic compression benchmark, "
                               "homogeneous -> high online gain. Mostly grayscale (loaded as RGB)."),
+    # --- JPEG / homogeneous (lossy source: not for lossless-ratio headline numbers) ---
+    "dtd":   dict(kind="url_zip", url="https://www.robots.ox.ac.uk/~vgg/data/dtd/download/dtd-r1.0.1.tar.gz",
+                  license="research (Oxford VGG)", gain="high"),
     "eurosat": dict(kind="hf", hf_id="blanchon/EuroSAT_RGB", split="train", image_key="image",
                     license="MIT / Sentinel-2 open", gain="high"),
-    # homogeneous single-category sets -> strong cross-image online gain (incl. cats)
     "cifar10": dict(kind="hf", hf_id="uoft-cs/cifar10", split="train", image_key="img",
                     license="research (Krizhevsky)", gain="high",
                     note="32x32; pick a single class for max homogeneity (e.g. cats)"),
@@ -58,21 +58,10 @@ DATASETS = {
 }
 
 
-def dl_url_files(key, spec, out, limit):
-    out.mkdir(parents=True, exist_ok=True)
-    for u in spec["urls"][:limit]:
-        dest = out / Path(u).name
-        if dest.exists() and dest.stat().st_size > 0:
-            continue
-        http_download(u, dest, desc=dest.name)
-    n = sum(1 for p in out.iterdir() if p.suffix.lower() in IMG_EXTS)
-    save_progress(out, files=n, gain=spec.get("gain"))
-    print(f"  [{key}] -> {out}  ({n} images)")
-
-
 def dl_url_zip(key, spec, out, limit):
+    """Download an archive (zip/tar) fully, then extract the first ``limit`` images."""
     out.mkdir(parents=True, exist_ok=True)
-    src = out / ("_source" + "".join(Path(spec['url']).suffixes[-2:]))
+    src = out / ("_source" + "".join(Path(spec["url"]).suffixes[-2:]))
     print(f"  [{key}] {spec['url']} (downloads archive, extracts {limit} images)")
     http_download(spec["url"], src, desc=f"{key} src")
     n = extract_media(src, out, limit, IMG_EXTS, "img")
@@ -81,6 +70,7 @@ def dl_url_zip(key, spec, out, limit):
 
 
 def dl_hf(key, spec, out, limit):
+    """Stream an HF image dataset and save the first ``limit`` images as PNG."""
     from datasets import load_dataset
     out.mkdir(parents=True, exist_ok=True)
     have = len(list(out.glob("img_*.png")))
@@ -105,55 +95,12 @@ def dl_hf(key, spec, out, limit):
     print(f"\n  [{key}] -> {out}  ({idx} images)")
 
 
-HANDLERS = {"url_files": dl_url_files, "url_zip": dl_url_zip, "hf": dl_hf}
+HANDLERS = {"url_zip": dl_url_zip, "hf": dl_hf}
 
 
 def main() -> int:
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-    p = argparse.ArgumentParser(description="Download IMAGE datasets -> data/image/")
-    p.add_argument("--dataset", nargs="*")
-    p.add_argument("--all", action="store_true")
-    p.add_argument("--limit", type=int, default=None, help="# images per dataset")
-    p.add_argument("--list", action="store_true")
-    p.add_argument("--force", action="store_true")
-    p.add_argument("--no-mirror", action="store_true")
-    p.add_argument("--hf-endpoint", default=None)
-    args = p.parse_args()
-
-    if args.list:
-        for k, s in DATASETS.items():
-            print(f"  {k:<10} gain={s.get('gain','?'):<4} {s['kind']:<10} {s.get('license','')}")
-        return 0
-
-    ep = setup_hf_endpoint(use_mirror=not args.no_mirror, endpoint=args.hf_endpoint)
-    print(f"HF endpoint: {ep}")
-    limit = args.limit if args.limit is not None else DEFAULT_LIMIT
-
-    keys = list(DATASETS) if args.all else (args.dataset or [])
-    if not keys:
-        p.error("specify --dataset KEY..., --all, or --list")
-    ok, failed, skipped = [], [], []
-    for k in keys:
-        spec = DATASETS.get(k)
-        if spec is None:
-            print(f"  [{k}] unknown — see --list"); failed.append(k); continue
-        out = IMG / k
-        if not external_guard(out, args.force):
-            skipped.append(k); continue
-        try:
-            HANDLERS[spec["kind"]](k, spec, out, limit)
-            ok.append(k)
-        except Exception as e:
-            print(f"  [{k}] FAILED: {type(e).__name__}: {str(e)[:140]}")
-            failed.append(k)
-    write_download_status(IMG, ok, failed, skipped)
-    print(f"\nIMAGE: {len(ok)} ok"
-          + (f", {len(failed)} FAILED: {', '.join(failed)}" if failed else "")
-          + (f", {len(skipped)} skipped: {', '.join(skipped)}" if skipped else ""))
-    return 1 if failed else 0
+    return run_download_cli("image", IMG, IMG, DATASETS, HANDLERS,
+                            default_limit=24, limit_kind="count")
 
 
 if __name__ == "__main__":

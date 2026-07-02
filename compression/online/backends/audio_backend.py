@@ -7,6 +7,8 @@ differ.
 """
 from __future__ import annotations
 
+from typing import List
+
 from compression.online.backends.bgpt_byte_backend import _BGPTByteBackend
 
 
@@ -17,3 +19,13 @@ class AudioBackend(_BGPTByteBackend):
     @property
     def modality(self) -> str:
         return "audio"
+
+    def reconstruct(self, canonical: List[bytes], framing: bytes):
+        """Regroup the decoded WAV chunk-blobs into one sample-exact PCM byte
+        string per clip.  With no framing the canonical blob list is returned
+        unchanged.
+        """
+        if not framing:
+            return canonical
+        from utils.audio_utils import reassemble_pcm_from_blobs
+        return reassemble_pcm_from_blobs(canonical, framing)

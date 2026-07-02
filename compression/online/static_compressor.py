@@ -34,7 +34,7 @@ class StaticCompressor(_ChunkedCompressor):
 
     # ------------------------------------------------------------------
 
-    def compress(self, raw: Any) -> bytes:
+    def compress(self, raw: Any, framing: bytes = b"") -> bytes:
         chunks = [c for c in self.backend.to_chunks(raw) if c.token_ids]
         total_ob = self.backend.raw_size_bytes(raw)
 
@@ -42,13 +42,13 @@ class StaticCompressor(_ChunkedCompressor):
         for group, _ in self._iter_intervals(chunks, self.batch_chunks):
             all_cds.extend(self.backend.encode_interval(self.compressor, group))
 
-        return self._assemble_archive(self.ROLE, self._settings(), all_cds, total_ob)
+        return self._assemble_archive(self.ROLE, self._settings(), all_cds, total_ob, framing)
 
     def decompress(self, archive_bytes: bytes) -> Any:
-        total_ob, cds = self._open_archive(self.ROLE, self._settings(), archive_bytes)
+        total_ob, framing, cds = self._open_archive(self.ROLE, self._settings(), archive_bytes)
 
         decoded: List[ChunkUnit] = []
         for group, _ in self._iter_intervals(cds, self.batch_chunks):
             decoded.extend(self.backend.decode_interval(self.compressor, group))
 
-        return self._finalize(decoded, total_ob)
+        return self._finalize(decoded, total_ob, framing)
