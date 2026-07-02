@@ -41,6 +41,10 @@ DATASETS = {
                      note="CLIC professional validation — lossless PNG (the standard uncompressed benchmark)"),
     "dtd":   dict(kind="url_zip", url="https://www.robots.ox.ac.uk/~vgg/data/dtd/download/dtd-r1.0.1.tar.gz",
                   license="research (Oxford VGG)", gain="high"),
+    "usc_textures": dict(kind="url_zip", url="https://sipi.usc.edu/database/textures.zip",
+                         license="USC-SIPI (research use)", gain="high",
+                         note="USC-SIPI texture volume: lossless TIFF (Brodatz); classic compression benchmark, "
+                              "homogeneous -> high online gain. Mostly grayscale (loaded as RGB)."),
     "eurosat": dict(kind="hf", hf_id="blanchon/EuroSAT_RGB", split="train", image_key="image",
                     license="MIT / Sentinel-2 open", gain="high"),
     # homogeneous single-category sets -> strong cross-image online gain (incl. cats)
