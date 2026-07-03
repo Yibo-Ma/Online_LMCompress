@@ -1,6 +1,6 @@
 {
-  "group_name": "audio_stage1",
-  "note": "Stage-1 search on LJSpeech (bGPT audio, c_attn LoRA), 1s WAV chunks. Compress-only, recent-only. audio_clips over-provisions and degrades to whatever the dir holds.",
+  "group_name": "search_audio",
+  "note": "Stage-1 search. bGPT audio, c_attn LoRA, dev = ljspeech, 1s WAV chunks. Compress-only, recent-only. audio_clips over-provisions and degrades to whatever the dir holds.",
   "modality": "audio",
   "fixed": {
     "model": "checkpoints/bgpt/weights-audio.pth",

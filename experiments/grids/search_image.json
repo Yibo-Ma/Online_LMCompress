@@ -1,6 +1,6 @@
 {
-  "group_name": "image_stage1",
-  "note": "Stage-1 search on CLIC (bGPT image, c_attn LoRA). 256px crops keep each run fast for ranking; Stage 3 uses full images. Compress-only, recent-only. image_count over-provisions and degrades to whatever the dir holds.",
+  "group_name": "search_image",
+  "note": "Stage-1 search. bGPT image, c_attn LoRA, dev = clic2024. 256px crops keep each run fast for ranking; Stage-3 uses full images. Compress-only, recent-only. chunk_size is irrelevant to bGPT (fixed patch structure) so it is not swept.",
   "modality": "image",
   "fixed": {
     "model": "checkpoints/bgpt/weights-image.pth",

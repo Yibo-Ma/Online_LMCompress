@@ -13,7 +13,7 @@ Config-driven and dependency-free: the grid, the manifest, each run's
 
 ```bash
 # 1. expand a grid -> manifest (prints the exact sbatch line + run count)
-python experiments/sweep.py gen --grid experiments/grids/text.json
+python experiments/sweep.py gen --grid experiments/grids/search_text.json
 
 # 2. submit the array (range + %concurrency printed by step 1)
 sbatch --array=0-242%16 experiments/run_array.sbatch results/sweeps/text/<group>

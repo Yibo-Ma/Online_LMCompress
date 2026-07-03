@@ -1,158 +1,138 @@
 # Sweep runbook
 
-Five stages, all driven by `experiments/sweep.py` (see `README.md` for the tool).
-Everything below is copy-paste. Objective per run: **`online_rate`** (bpc text /
-bpsp image / bps audio), lower is better; `delta_pct` is the static→online gain.
+Five stages, all driven by `sweep.py` (tool docs: `README.md`). Objective per run:
+**`online_rate`** (bpc text / bpsp image / bps audio), lower is better; `delta_pct`
+= static→online gain. Grids live in `grids/`, named by stage.
 
 ```
-Stage 0  losslessness verification   (not a sweep — must pass before anything)
-Stage 1  hyperparameter search       grids/{text,image,audio}.json
-Stage 1b refine (optional)           narrowed copy of the winning region
-Stage 2  scaling / amortization curve grids/scaling.json
-Stage 3  headline numbers            grids/headline.json
-Stage 4  ablations                   grids/ablation_targets.json
+Stage 0   losslessness + determinism check  (not a sweep — must pass first)
+Stage 1   hyperparameter search             search_{text,image,audio}.json
+Stage 1.5 model-scaling (text)              models_text.json
+Stage 2   amortization curve                clone a headline grid, swap axis -> size
+Stage 3   headline main table               headline_{text,image,audio}.json
+Stage 4   ablations                         clone a headline grid, swap axis -> one knob
 ```
 
----
+Method in one line: **tune cheap on a dev dataset → freeze one config → model-scaling
+→ size-scaling to the plateau → headline over the committed datasets (baseline / static /
+online) → ablations.** Search is compress-only; losslessness is confirmed once (Stage 3).
 
-## 0. One-time setup
+## 0. One-time
 
-1. Edit `experiments/run_array.sbatch`: `PROJECT_DIR`, `CONDA_SH`, `CONDA_ENV`,
-   and the `#SBATCH` resource lines for your partition.
-2. Edit the `model` / `data` paths in the grid files to your cluster's layout
-   (this repo uses `checkpoints/…` + `data/…`; your box uses `pretrained/…` +
-   `txt_data_normalized/…`).
-3. Confirm the datasets/checkpoints exist on a compute node.
+Edit `run_array.sbatch` (`PROJECT_DIR`, `CONDA_SH`, `CONDA_ENV`, `#SBATCH` resources) for
+your cluster. Data present now covers Stage 0/1/1.5; Stage 3 also needs `kodak`,
+`usc_textures`, `librispeech` — download those in parallel while Stage 1 runs.
 
----
+## Stage 0 — losslessness + determinism (must pass before any sweep)
 
-## Stage 0 — losslessness verification (bit-exactness on THIS stack)
-
-Online losslessness is bit-fragile; confirm a round-trip on the H200 stack once,
-per modality, **before** spending a sweep. These decompress (no `--no-decompress`).
+Verifies bit-exact round-trip on this GPU stack. Each is **one line** (a `\` continuation
+must have no trailing space).
 
 ```bash
-python evaluation/eval_online.py --modality text  --mode both --max-bytes 200000 \
-    --data data/text/normalized/qwen2.5/pile_of_law_eurlex --chunk-size 1024 --train-interval 4 --epochs-per-train 1
-python evaluation/eval_online.py --modality image --mode both --data data/image/clic2024 \
-    --image-count 2 --image-crop 128 --train-interval 4 --epochs-per-train 1
-python evaluation/eval_online.py --modality audio --mode both --data data/audio/ljspeech \
-    --audio-clips 3 --chunk-ms 1000 --train-interval 4 --epochs-per-train 1
+python evaluation/eval_online.py --modality text --mode both --model checkpoints/Qwen3-4B-Base --data data/text/normalized/qwen3/pile_of_law_eurlex --max-bytes 30000 --chunk-size 512 --train-interval 4 --epochs-per-train 1
+python evaluation/eval_online.py --modality image --mode both --data data/image/clic2024 --image-count 2 --image-crop 100 --train-interval 4 --epochs-per-train 1
+python evaluation/eval_online.py --modality audio --mode both --data data/audio/ljspeech --audio-clips 3 --chunk-ms 1000 --train-interval 4 --epochs-per-train 1
 ```
 
-Each must print `round-trip: OK` for **both** STATIC and ONLINE. A `FAILED` here
-means the deterministic stack differs (GPU/driver/lib) — fix before sweeping.
-
----
+Each must print `round-trip: OK` for **both** STATIC and ONLINE. A `FAILED` means the
+deterministic stack differs (GPU/driver/lib) — fix before sweeping.
 
 ## Stage 1 — hyperparameter search (per modality)
 
-`text.json` = 162 runs, `image.json` / `audio.json` = 81 each. Tune on ONE dev
-dataset; the winner is confirmed across datasets in Stage 3.
+`search_text` = 243 runs, `search_image`/`search_audio` = 81 each.
 
 ```bash
-# text (repeat for image / audio by swapping the grid)
-python experiments/sweep.py gen --grid experiments/grids/text.json --max-parallel 32
-# -> prints:  sbatch --array=0-161%32 experiments/run_array.sbatch results/sweeps/text/<group>
-sbatch --array=0-161%32 experiments/run_array.sbatch results/sweeps/text/<group>
-
-# monitor (safe any time)
-python experiments/sweep.py ls
-python experiments/sweep.py agg --group results/sweeps/text/<group>   # partial ok
-
-# when done: read the table + winner
-python experiments/sweep.py agg --group results/sweeps/text/<group>
-#   -> summary.csv (sorted), best_config.json (ready for lossless confirm)
+python experiments/sweep.py gen --grid experiments/grids/search_text.json --max-parallel 32
+# -> prints: sbatch --array=0-242%32 experiments/run_array.sbatch results/sweeps/text/<group>
+sbatch --array=0-242%32 experiments/run_array.sbatch results/sweeps/text/<group>
+python experiments/sweep.py ls                                        # progress, any time
+python experiments/sweep.py agg --group results/sweeps/text/<group>   # summary.csv + best_config.json
 ```
 
-Read `summary.csv` and the printed top-K. Sanity checks: `lr` should have a clear
-optimum (too high hurts); more `epochs_per_train` helps until it plateaus/overfits;
-larger `lora_r` helps until it saturates. If the winner sits on a grid edge (e.g.
-best `lr` = 3e-4, the max), run Stage 1b.
+Repeat with `search_image.json` (`--array=0-80`) and `search_audio.json`. In
+`summary.csv` the lowest `online_rate` row is the winner. If it sits on a grid edge
+(e.g. best `lr` = the max), run a narrowed refine (same mechanism as Stage 4).
 
----
+## Stage 1.5 — model-scaling (text; picks the headline model)
 
-## Stage 1b — refine (optional, only if the winner is on an edge)
-
-Copy the grid, narrow every axis around the winner (finer `lr`, neighbouring
-`train_interval`/`epochs`/`r`), re-gen, re-submit. Same commands.
-
----
-
-## Stage 2 — scaling / amortization curve (the key figure)
-
-Fix the Stage-1 winner, sweep only stream size → find the plateau and the
-online-vs-static crossover. Build the grid straight from `best_config.json`:
+Paste the Stage-1 text winner hyperparams into `models_text.json`'s `fixed`, then:
 
 ```bash
-BEST=results/sweeps/text/<group>/best_config.json
-python - "$BEST" > experiments/grids/scaling_filled.json <<'PY'
-import json, sys
-w = json.load(open(sys.argv[1]))
-for k in ("mode", "max_bytes", "no_decompress"): w.pop(k, None)
-w["no_decompress"] = True                      # compress-only; mode defaults to both
-spec = {"group_name": "text_scaling", "modality": w.pop("modality"),
-        "fixed": w,
-        "grid": {"max_bytes": [1_000_000, 4_000_000, 16_000_000, 64_000_000, 256_000_000]}}
-print(json.dumps(spec, indent=2))
-PY
-
-python experiments/sweep.py gen --grid experiments/grids/scaling_filled.json --max-parallel 8
-sbatch --array=0-4%8 experiments/run_array.sbatch results/sweeps/text/<group>
+python experiments/sweep.py gen --grid experiments/grids/models_text.json
+sbatch --array=0-2%3 experiments/run_array.sbatch results/sweeps/text/<group>
 python experiments/sweep.py agg --group results/sweeps/text/<group>
 ```
 
-Plot `online_rate` (and `static_rate`) vs `max_bytes` from `summary.csv`. The
-**headline size = smallest size where the curve has flattened** (marginal gain per
-doubling < ~1–2%). Add `1_000_000_000` for the final plateau point if wall-time
-allows (one long sequential run).
+Headline model = the best `online_rate` that is compute-feasible (bigger is usually
+lower; the bpc-vs-model-size curve is itself a paper result).
 
-Image/audio: same, but sweep `image_count` (e.g. `[8,16,32,64,128]`) or
-`audio_clips` (e.g. `[16,32,64,128,256]`) instead of `max_bytes`.
+## Freeze the config
 
----
+Paste the winner hyperparams + chosen model into each `headline_{text,image,audio}.json`
+`fixed` block. **These grids are now the single source of truth** cloned by Stage 2/4.
 
-## Stage 3 — headline numbers (frozen winner, all datasets)
+## Stage 2 — amortization curve (per modality)
 
-Set `headline.json`'s `fixed` to the winner + the plateau `max_bytes`, list every
-test dataset in `grid.data`, then:
+Clone a headline grid, move ONE dataset into `fixed`, replace `grid` with the size ladder:
 
 ```bash
-python experiments/sweep.py gen --grid experiments/grids/headline.json --max-parallel 16
-sbatch --array=0-N%16 experiments/run_array.sbatch results/sweeps/text/<group>
-python experiments/sweep.py agg --group results/sweeps/text/<group>     # the paper table
-
-# lossless confirmation of one run (mode both, decompress on) — agg already wrote it:
-python evaluation/eval_online.py --config results/sweeps/text/<group>/best_config.json
-```
-
-`summary.csv` is the per-dataset online/static/delta table for the paper. Compare
-against traditional baselines (bz2/brotli, FLAC, JPEG-XL) at the same data sizes.
-
----
-
-## Stage 4 — ablations (one axis each, all else = winner)
-
-```bash
-python experiments/sweep.py gen --grid experiments/grids/ablation_targets.json --max-parallel 4
-sbatch --array=0-2%4 experiments/run_array.sbatch results/sweeps/text/<group>
+cp experiments/grids/headline_text.json experiments/grids/scaling_text.json
+# edit scaling_text.json:  fixed.data = one report dataset;  delete fixed.max_bytes;
+#   "grid": {"max_bytes": [1000000, 4000000, 16000000, 64000000, 256000000]}
+python experiments/sweep.py gen --grid experiments/grids/scaling_text.json
+sbatch --array=0-4%5 experiments/run_array.sbatch results/sweeps/text/<group>
 python experiments/sweep.py agg --group results/sweeps/text/<group>
 ```
 
-Clone `ablation_targets.json` for other single-axis studies: LoRA rank/capacity,
-`train_interval` (adaptation frequency), `epochs_per_train` (compute–ratio
-Pareto), `train_on_all: [false, true]` (recent vs all-seen), cross-domain
-(specialised vs general `data`).
+Plot `online_rate` & `static_rate` vs the size axis → the plateau = the headline size,
+and where online overtakes static (crossover). Image: sweep `image_count`
+[8,16,32,64,128] with `image_crop: 0`. Audio: sweep `audio_clips` [16,32,64,128,256].
 
----
+## Stage 3 — headline main table
+
+Set each `headline_*.json` `fixed.max_bytes` / count to the Stage-2 plateau, then:
+
+```bash
+python experiments/sweep.py gen --grid experiments/grids/headline_text.json
+sbatch --array=0-3%4 experiments/run_array.sbatch results/sweeps/text/<group>
+python experiments/sweep.py agg --group results/sweeps/text/<group>   # the paper table
+```
+
+Repeat for image (`--array=0-2`) and audio (`--array=0-3`). `summary.csv` gives, per
+dataset, `static_rate` + `online_rate` + `delta_pct`. Two things live **outside** the sweep:
+
+- **Traditional baselines** (text: bz2/brotli/zlib; audio: FLAC; image: PNG/JPEG-XL/WebP)
+  at the same data sizes — standard tools / `evaluation/*baselines*` — as extra columns.
+- **One lossless confirmation** (a real round-trip, not compress-only): agg already wrote
+  `best_config.json` with `mode: both`, `no_decompress: false`, so:
+  `python evaluation/eval_online.py --config results/sweeps/text/<group>/best_config.json`
+
+## Stage 4 — ablations (one axis each)
+
+Clone a headline grid, fix `data` to one dataset, sweep one knob:
+
+```bash
+cp experiments/grids/headline_text.json experiments/grids/ablation_text.json
+# edit:  fixed.data = one dataset;  delete fixed.target_modules;
+#   "grid": {"target_modules": ["q_proj,v_proj", "q_proj,k_proj,v_proj,o_proj",
+#            "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"]}
+python experiments/sweep.py gen --grid experiments/grids/ablation_text.json
+sbatch --array=0-2%3 experiments/run_array.sbatch results/sweeps/text/<group>
+python experiments/sweep.py agg --group results/sweeps/text/<group>
+```
+
+Same pattern for `lora_r` (capacity), `train_interval` / `epochs_per_train`
+(compute–ratio Pareto), `train_on_all: [false, true]` (recent vs all-seen), or a
+hyperparameter-sensitivity grid (small ranges around the winner → shows the method is not
+fragile, which defends reporting one fixed config everywhere).
 
 ## Ops cheatsheet
 
 | Need | Command |
 |---|---|
-| List every sweep + best rate | `python experiments/sweep.py ls` |
+| List all sweeps + best rate | `python experiments/sweep.py ls` |
 | Aggregate (safe mid-flight) | `python experiments/sweep.py agg --group <g>` |
-| Resume failed/killed rows | re-run the **same** `sbatch --array=…` line (`--skip-done` skips finished) |
+| Resume failed/killed rows | re-run the same `sbatch --array=…` line (`--skip-done` skips finished) |
 | Re-run only row 37 | `sbatch --array=37 experiments/run_array.sbatch <group>` |
 | Reproduce one run locally | `python evaluation/eval_online.py --config <group>/runs/<id>/config.json` |
 | Inspect a run | `<group>/runs/<id>/{config.json,status.json,result.json,run.log}` |
