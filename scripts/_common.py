@@ -384,10 +384,27 @@ def external_guard(out: Path, force: bool) -> bool:
     return True
 
 
+def _is_macos_junk(name: str) -> bool:
+    """True for macOS zip cruft: the ``__MACOSX/`` folder and AppleDouble ``._``
+    sidecars.  These carry image extensions but are not images (their content is a
+    resource-fork header ``\\x00\\x05\\x16\\x07 ... Mac OS X ... ATTR``), so if the
+    extension filter grabs them they land as tiny unopenable ``img_*.png`` files."""
+    parts = name.replace("\\", "/").split("/")
+    return "__MACOSX" in parts or parts[-1].startswith("._")
+
+
 def read_zip_member(src: Path, member: Optional[str], limit_bytes: Optional[int] = None) -> bytes:
-    """Read up to ``limit_bytes`` from one member of a zip file."""
+    """Read up to ``limit_bytes`` from one member of a zip file.
+
+    With ``member=None`` the first *real* member is used, skipping macOS
+    ``__MACOSX`` / ``._`` cruft that could otherwise sort ahead of the real file."""
     with zipfile.ZipFile(src) as zf:
-        name = member or zf.namelist()[0]
+        if member:
+            name = member
+        else:
+            reals = [m for m in zf.namelist()
+                     if not m.endswith("/") and not _is_macos_junk(m)]
+            name = reals[0] if reals else zf.namelist()[0]
         with zf.open(name) as f:
             return f.read(limit_bytes) if limit_bytes else f.read()
 
@@ -427,7 +444,7 @@ def stream_extract_tar(url: str, out_dir: Path, limit: int,
             for m in tf:
                 if n >= limit:
                     break                                 # closes the connection -> stops downloading
-                if not (m.isfile() and m.name.lower().endswith(exts)):
+                if not (m.isfile() and m.name.lower().endswith(exts)) or _is_macos_junk(m.name):
                     continue
                 if seen < have:                           # resume: skip already-extracted
                     seen += 1
@@ -458,7 +475,8 @@ def extract_media(archive: Path, out_dir: Path, limit: int,
     if al.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
             names = [m for m in zf.namelist()
-                     if m.lower().endswith(exts) and not m.endswith("/")]
+                     if m.lower().endswith(exts) and not m.endswith("/")
+                     and not _is_macos_junk(m)]
             for m in names[have:limit]:
                 (out_dir / f"{prefix}_{n:05d}{Path(m).suffix.lower()}").write_bytes(zf.read(m))
                 n += 1
@@ -469,7 +487,7 @@ def extract_media(archive: Path, out_dir: Path, limit: int,
             for m in tf:
                 if n >= limit:
                     break
-                if m.isfile() and m.name.lower().endswith(exts):
+                if m.isfile() and m.name.lower().endswith(exts) and not _is_macos_junk(m.name):
                     if seen < have:                  # skip already-extracted
                         seen += 1
                         continue
