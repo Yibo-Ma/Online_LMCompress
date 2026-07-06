@@ -37,21 +37,34 @@ python evaluation/eval_online.py --modality audio --mode both --data data/audio/
 Each must print `round-trip: OK` for **both** STATIC and ONLINE. A `FAILED` means the
 deterministic stack differs (GPU/driver/lib) — fix before sweeping.
 
-## Stage 1 — hyperparameter search (per modality)
+## Stage 1 — hyperparameter search (iterative rounds)
 
-`search_text` = 243 runs, `search_image`/`search_audio` = 81 each.
+Stage 1 runs in ROUNDS: a broad round 1, then extend/refine rounds until the winner
+stops moving. Grids live in `grids/round<N>/search_{text,image,audio}.json`.
+
+Run one round (per modality; example = round 1, text):
 
 ```bash
-python experiments/sweep.py gen --grid experiments/grids/search_text.json --max-parallel 32
-# -> prints: sbatch --array=0-242%32 experiments/run_array.sbatch results/sweeps/text/<group>
-sbatch --array=0-242%32 experiments/run_array.sbatch results/sweeps/text/<group>
+python experiments/sweep.py gen --grid experiments/grids/round1/search_text.json --max-parallel 32
+# -> prints the exact sbatch line + run count
+sbatch --array=0-N%32 experiments/run_array.sbatch results/sweeps/text/<group>
 python experiments/sweep.py ls                                        # progress, any time
-python experiments/sweep.py agg --group results/sweeps/text/<group>   # summary.csv + best_config.json
+python experiments/sweep.py agg --group results/sweeps/text/<group>   # summary.csv (sorted)
 ```
 
-Repeat with `search_image.json` (`--array=0-80`) and `search_audio.json`. In
-`summary.csv` the lowest `online_rate` row is the winner. If it sits on a grid edge
-(e.g. best `lr` = the max), run a narrowed refine (same mechanism as Stage 4).
+Repeat for image / audio; for the next round swap `round1/` → `round2/` (etc.).
+
+**Round decision rule** (read `summary.csv`, look at the winning row):
+- **A swept knob sits at an EDGE of its range** (best `lr` = the max, best
+  `train_interval` = the min, …) → the optimum is outside the grid → **EXTEND that
+  direction** next round.
+- **A knob is INTERIOR** (winner not at either end) → it has converged → **narrow / fix** it.
+- Keep the `target_modules` axis (attn vs attn+MLP) until one clearly wins, then fix it.
+- **Converged = no knob is on an edge.** Then freeze the winner → Stage 1.5. Reaching
+  this usually takes round 2–4 — that's expected, not a problem.
+
+Each round's grid is kept under `grids/round<N>/`, and every run's exact spec is also
+archived in its group's `grid.json`, so the whole tuning trajectory is reproducible.
 
 ## Stage 1.5 — model-scaling (text; picks the headline model)
 

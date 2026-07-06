@@ -6,7 +6,7 @@ Config-driven and dependency-free.  One run == one JSON config == one array task
 ``eval_online.py`` all speak the SAME flat schema (eval_online's argument names),
 so there is no flag-translation layer to drift.
 
-    python experiments/sweep.py gen --grid experiments/grids/search_text.json
+    python experiments/sweep.py gen --grid experiments/grids/round1/search_text.json
     sbatch --array=0-N%K experiments/run_array.sbatch <group_dir>     # -> sweep.py run
     python experiments/sweep.py agg --group <group_dir>
     python experiments/sweep.py ls                                    # every sweep at a glance
