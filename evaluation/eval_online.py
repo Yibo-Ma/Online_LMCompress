@@ -275,6 +275,11 @@ def _build_parser():
     p.add_argument("--data", default=None, help="default: per-modality sample")
     p.add_argument("--max-bytes", type=int, default=10000, help="text/audio length cap")
     p.add_argument("--chunk-size", type=int, default=512, help="text: tokens per chunk")
+    p.add_argument("--max-seq-len", type=int, default=None,
+                   help="LoRA training window length in tokens (default: = chunk-size). "
+                        "Decoupling lets a large coding context (e.g. 8192) train on "
+                        "memory-safe windows (e.g. 2048): backward memory is O(max_seq_len^2), "
+                        "independent of chunk-size.")
     p.add_argument("--batch-chunks", type=int, default=4, help="static batch size")
     p.add_argument("--train-interval", type=int, default=4)
     p.add_argument("--epochs-per-train", type=int, default=3)
@@ -412,7 +417,7 @@ def main():
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
-        max_seq_len=args.chunk_size,
+        max_seq_len=args.max_seq_len or args.chunk_size,
         epochs_per_train=args.epochs_per_train,
         train_interval=args.train_interval,
         train_on_recent_only=not args.train_on_all,
