@@ -39,9 +39,13 @@ DATASETS = {
                         note="OpenSLR direct (avoids HF librosa dep); single reader per chapter"),
     "ljspeech":    dict(kind="url_tar", url="https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2",
                         license="public domain", gain="high", note="single female speaker (2.6GB)"),
-    "maestro":     dict(kind="url_tar", url="https://storage.googleapis.com/magentadata/datasets/maestro/v3.0.0/maestro-v3.0.0.zip",
+    "maestro":     dict(kind="hf_audio", hf_id="ddPn08/maestro-v3.0.0", config=None,
+                        split="train", audio_key="audio",
                         license="CC-BY-NC-SA (non-commercial)", gain="high",
-                        note="solo piano; ~120GB zip — downloads fully before extracting --limit wavs"),
+                        note="solo piano, ~9 min/clip (long-form + homogeneous -> ideal for online). "
+                             "HF-STREAMED: pulls only the first --limit clips, skipping the 120GB official "
+                             "zip. If this mirror's schema differs, verify it on the cluster (one-liner in "
+                             "the README/handler docstring) and adjust hf_id / split / audio_key."),
     "peoples_speech": dict(kind="hf_parquet", hf_id="MLCommons/peoples_speech", config="test",
                            split="test", audio_key="audio", license="CC-BY 4.0 / CC0", gain="med"),
     # homogeneous / single-source -> strong online gain
@@ -101,7 +105,59 @@ def dl_hf_parquet(key, spec, out, limit):
     print(f"  [{key}] -> {dst}  ({len(rows)} clips)")
 
 
-HANDLERS = {"url_tar": dl_url_tar, "hf_parquet": dl_hf_parquet}
+def dl_hf_audio(key, spec, out, limit):
+    """Stream an HF audio dataset and save the first ``limit`` clips as individual
+    files (clip_*.wav/.flac), so long-form audio (MAESTRO) is fetched WITHOUT the
+    120GB zip.  Audio stays raw encoded bytes (decode=False -> no librosa, no
+    re-encode); the loader (utils/audio_utils) reads wav/flac directly.
+
+    Verify a mirror's schema on the cluster before a big pull::
+
+        python -c "from datasets import load_dataset; \
+r=next(iter(load_dataset('ddPn08/maestro-v3.0.0', split='train', streaming=True))); \
+print(list(r)); print({k: type(v).__name__ for k,v in r.items()})"
+
+    then set hf_id / split / audio_key in the DATASETS entry to match.
+    """
+    from datasets import load_dataset, Audio
+    out.mkdir(parents=True, exist_ok=True)
+    have = len(list(out.glob("clip_*.*")))
+    if have >= limit:
+        print(f"  [{key}] already {have} clips (>= limit)"); return
+
+    audio_key = spec.get("audio_key", "audio")
+    print(f"  [{key}] stream {spec['hf_id']} ({spec.get('config')}) -> {limit} clips "
+          f"(skips the 120GB zip)")
+    ds = load_dataset(spec["hf_id"], spec.get("config"), split=spec["split"], streaming=True)
+    ds = ds.cast_column(audio_key, Audio(decode=False))       # keep raw encoded bytes
+
+    idx = 0
+    for row in ds:
+        if idx < have:
+            idx += 1; continue
+        a = row.get(audio_key)
+        if isinstance(a, dict) and a.get("bytes"):
+            ext = (os.path.splitext(a.get("path") or "")[1] or ".wav").lower()
+            with open(out / f"clip_{idx:05d}{ext}", "wb") as f:
+                f.write(a["bytes"])
+        elif isinstance(a, dict) and a.get("array") is not None:
+            import soundfile as sf
+            sf.write(str(out / f"clip_{idx:05d}.wav"), a["array"], a["sampling_rate"], format="WAV")
+        else:
+            raise ValueError(
+                f"[{key}] row {idx}: no audio in column '{audio_key}'. Mirror "
+                f"'{spec['hf_id']}' may be MIDI-only or use a different column — verify its "
+                f"schema (see docstring) and set audio_key / split / hf_id accordingly.")
+        idx += 1
+        sys.stdout.write(f"\r    {idx}/{limit}"); sys.stdout.flush()
+        if idx >= limit:
+            break
+
+    save_progress(out, clips=idx, source=spec["hf_id"], gain=spec.get("gain"))
+    print(f"\n  [{key}] -> {out}  ({idx} clips)")
+
+
+HANDLERS = {"url_tar": dl_url_tar, "hf_parquet": dl_hf_parquet, "hf_audio": dl_hf_audio}
 
 
 def main() -> int:
