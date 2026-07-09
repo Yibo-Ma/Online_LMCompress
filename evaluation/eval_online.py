@@ -152,7 +152,21 @@ def _load_raw(modality: str, path: str, args):
             clips = [chunk_pydub_audio(audio_to_pydub_seg(path), chunk_ms=args.chunk_ms)]
 
         blobs = [b for clip in clips for b in clip]
-        framing = serialize_audio_framing([len(c) for c in clips])
+        clip_counts = [len(c) for c in clips]
+        if args.max_chunks is not None and args.max_chunks < len(blobs):
+            # Scale WITHIN the stream: keep the first N chunks and re-split them back
+            # onto the original clip boundaries so framing stays exact. Lets a single
+            # long clip trace an amortization curve without changing data content.
+            blobs = blobs[:args.max_chunks]
+            clip_counts, remaining = [], len(blobs)
+            for c in clips:
+                take = min(len(c), remaining)
+                if take:
+                    clip_counts.append(take)
+                remaining -= take
+                if remaining <= 0:
+                    break
+        framing = serialize_audio_framing(clip_counts)
         reference = reassemble_pcm_from_blobs(blobs, framing)   # per-clip PCM, sample-level
         # 8 kHz / 8-bit / mono WAV chunks: 1 PCM byte == 1 sample, minus one header per chunk
         content_units = sum(len(b) - _WAV_HEADER_BYTES for b in blobs)
@@ -300,6 +314,9 @@ def _build_parser():
     p.add_argument("--chunk-ms", type=int, default=250, help="audio: chunk duration ms")
     p.add_argument("--audio-clips", type=int, default=1,
                    help="audio: # clips from a dataset to concatenate into one stream")
+    p.add_argument("--max-chunks", type=int, default=None,
+                   help="audio: cap the stream to the first N chunks (scale WITHIN a long clip — "
+                        "a clean amortization axis that does not change data content)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no-decompress", action="store_true",
                    help="compress only (skip slow lossless verification)")
