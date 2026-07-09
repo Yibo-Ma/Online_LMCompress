@@ -39,13 +39,14 @@ DATASETS = {
                         note="OpenSLR direct (avoids HF librosa dep); single reader per chapter"),
     "ljspeech":    dict(kind="url_tar", url="https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2",
                         license="public domain", gain="high", note="single female speaker (2.6GB)"),
-    "maestro":     dict(kind="hf_audio", hf_id="ddPn08/maestro-v3.0.0", config=None,
-                        split="train", audio_key="audio",
+    "maestro":     dict(kind="hf_audio", hf_id="ddPn08/maestro-v3.0.0", revision="main",
+                        manifest="maestro-v3.0.0.csv", audio_col="audio_filename",
                         license="CC-BY-NC-SA (non-commercial)", gain="high",
                         note="solo piano, ~9 min/clip (long-form + homogeneous -> ideal for online). "
-                             "HF-STREAMED: pulls only the first --limit clips, skipping the 120GB official "
-                             "zip. If this mirror's schema differs, verify it on the cluster (one-liner in "
-                             "the README/handler docstring) and adjust hf_id / split / audio_key."),
+                             "The mirror stores raw year-folder .wav files (no parquet). We DIRECT-download "
+                             "the first --limit clips over the mirror's /resolve/ URLs, driven by the repo's "
+                             "CSV manifest — bypassing datasets.load_dataset(streaming), whose /api tree "
+                             "listing ignores HF_ENDPOINT and hits huggingface.co. Fetches a few clips, not 129GB."),
     "peoples_speech": dict(kind="hf_parquet", hf_id="MLCommons/peoples_speech", config="test",
                            split="test", audio_key="audio", license="CC-BY 4.0 / CC0", gain="med"),
     # homogeneous / single-source -> strong online gain
@@ -106,55 +107,55 @@ def dl_hf_parquet(key, spec, out, limit):
 
 
 def dl_hf_audio(key, spec, out, limit):
-    """Stream an HF audio dataset and save the first ``limit`` clips as individual
-    files (clip_*.wav/.flac), so long-form audio (MAESTRO) is fetched WITHOUT the
-    120GB zip.  Audio stays raw encoded bytes (decode=False -> no librosa, no
-    re-encode); the loader (utils/audio_utils) reads wav/flac directly.
+    """Fetch the first ``limit`` audio clips from a MAESTRO-style HF mirror by DIRECT
+    file download over the mirror's ``/resolve/`` URLs, driven by the repo's CSV
+    manifest.  This deliberately avoids ``datasets.load_dataset(streaming=True)``,
+    whose ``/api/.../tree`` repo listing ignores ``HF_ENDPOINT`` and hits
+    ``huggingface.co`` — which fails on mirror-only / air-gapped clusters.
 
-    Verify a mirror's schema on the cluster before a big pull::
-
-        python -c "from datasets import load_dataset; \
-r=next(iter(load_dataset('ddPn08/maestro-v3.0.0', split='train', streaming=True))); \
-print(list(r)); print({k: type(v).__name__ for k,v in r.items()})"
-
-    then set hf_id / split / audio_key in the DATASETS entry to match.
+    Repo layout expected (ddPn08/maestro-v3.0.0): year folders of ``.wav``/``.midi``
+    plus ``maestro-v3.0.0.csv`` whose ``audio_filename`` column holds each clip's
+    path relative to the repo root.  The csv is the first (small) file fetched, so a
+    failure here is a clean connectivity test before any large audio pull.
     """
-    from datasets import load_dataset, Audio
+    import csv as _csv
+    from urllib.parse import quote
+
     out.mkdir(parents=True, exist_ok=True)
     have = len(list(out.glob("clip_*.*")))
     if have >= limit:
         print(f"  [{key}] already {have} clips (>= limit)"); return
 
-    audio_key = spec.get("audio_key", "audio")
-    print(f"  [{key}] stream {spec['hf_id']} ({spec.get('config')}) -> {limit} clips "
-          f"(skips the 120GB zip)")
-    ds = load_dataset(spec["hf_id"], spec.get("config"), split=spec["split"], streaming=True)
-    ds = ds.cast_column(audio_key, Audio(decode=False))       # keep raw encoded bytes
+    repo = spec["hf_id"]
+    rev = spec.get("revision", "main")
+    manifest = spec.get("manifest", "maestro-v3.0.0.csv")
+    audio_col = spec.get("audio_col", "audio_filename")
+    endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com").rstrip("/")
 
-    idx = 0
-    for row in ds:
-        if idx < have:
-            idx += 1; continue
-        a = row.get(audio_key)
-        if isinstance(a, dict) and a.get("bytes"):
-            ext = (os.path.splitext(a.get("path") or "")[1] or ".wav").lower()
-            with open(out / f"clip_{idx:05d}{ext}", "wb") as f:
-                f.write(a["bytes"])
-        elif isinstance(a, dict) and a.get("array") is not None:
-            import soundfile as sf
-            sf.write(str(out / f"clip_{idx:05d}.wav"), a["array"], a["sampling_rate"], format="WAV")
-        else:
-            raise ValueError(
-                f"[{key}] row {idx}: no audio in column '{audio_key}'. Mirror "
-                f"'{spec['hf_id']}' may be MIDI-only or use a different column — verify its "
-                f"schema (see docstring) and set audio_key / split / hf_id accordingly.")
+    def resolve(path: str) -> str:
+        return f"{endpoint}/datasets/{repo}/resolve/{rev}/{quote(path, safe='/')}"
+
+    print(f"  [{key}] direct /resolve download from {repo} (via {manifest}, no /api tree)")
+    csv_local = out / "_manifest.csv"
+    http_download(resolve(manifest), csv_local, desc="manifest")
+    with open(csv_local, newline="", encoding="utf-8") as f:
+        rows = list(_csv.DictReader(f))
+    if not rows or audio_col not in rows[0]:
+        raise ValueError(
+            f"[{key}] column '{audio_col}' not in {manifest}; columns = "
+            f"{list(rows[0].keys()) if rows else '(empty csv)'}. Adjust audio_col/manifest.")
+    audio_files = [r[audio_col] for r in rows if r.get(audio_col)]
+
+    idx = have
+    for rel in audio_files[have:limit]:
+        ext = (os.path.splitext(rel)[1] or ".wav").lower()
+        http_download(resolve(rel), out / f"clip_{idx:05d}{ext}", desc=f"clip {idx}")
         idx += 1
-        sys.stdout.write(f"\r    {idx}/{limit}"); sys.stdout.flush()
         if idx >= limit:
             break
 
-    save_progress(out, clips=idx, source=spec["hf_id"], gain=spec.get("gain"))
-    print(f"\n  [{key}] -> {out}  ({idx} clips)")
+    save_progress(out, clips=idx, source=repo, gain=spec.get("gain"))
+    print(f"  [{key}] -> {out}  ({idx} clips)")
 
 
 HANDLERS = {"url_tar": dl_url_tar, "hf_parquet": dl_hf_parquet, "hf_audio": dl_hf_audio}
