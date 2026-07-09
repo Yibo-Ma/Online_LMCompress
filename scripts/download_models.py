@@ -38,6 +38,7 @@ HF_CO = "https://huggingface.co"
 MODELS = {
     "qwen2.5-0.5b": dict(source="hf_repo", repo="Qwen/Qwen2.5-0.5B",    dir="Qwen2.5-0.5B"),
     "qwen2.5-7b":   dict(source="hf_repo", repo="Qwen/Qwen2.5-7B",      dir="Qwen2.5-7B"),
+    "qwen3-0.6b":   dict(source="hf_repo", repo="Qwen/Qwen3-0.6B-Base", dir="Qwen3-0.6B-Base"),
     "qwen3-1.7b":   dict(source="hf_repo", repo="Qwen/Qwen3-1.7B-Base", dir="Qwen3-1.7B-Base"),
     "qwen3-4b":     dict(source="hf_repo", repo="Qwen/Qwen3-4B-Base",   dir="Qwen3-4B-Base"),
     "qwen3-8b":     dict(source="hf_repo", repo="Qwen/Qwen3-8B-Base",   dir="Qwen3-8B-Base"),

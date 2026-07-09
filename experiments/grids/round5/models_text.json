@@ -23,6 +23,7 @@
   },
   "grid": {
     "model": [
+      "checkpoints/Qwen3-0.6B-Base",
       "checkpoints/Qwen3-1.7B-Base",
       "checkpoints/Qwen3-4B-Base"
     ]
