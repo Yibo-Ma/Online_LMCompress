@@ -85,31 +85,26 @@ DATASETS = {
                                note="S&P500 earnings-call transcripts (high delta: ritualized format). "
                                     "Single ~1.8GB parquet — downloads fully then byte-caps; fields=None "
                                     "auto-picks the transcript column."),
-    "the_stack_python":   dict(kind="hf_parquet", repo="bigcode/the-stack", revision="main",
-                               files=["data/python/train-00000-of-00206.parquet"], fields=["content"],
-                               license="permissive OSS (per-file MIT/Apache/BSD)", gain="high",
-                               note="GATED: accept terms at hf.co/datasets/bigcode/the-stack AND export a "
-                                    "HF_TOKEN that has accepted them; the mirror may not proxy gated files. "
-                                    "Test this first; if it 401/403s, use github_code_python instead. Add more "
-                                    "of the 206 shards to `files` for more data."),
-    "github_code_python": dict(kind="hf", hf_id="codeparrot/github-code", config=None, split="train",
-                               fields=["code"], streaming=True,
-                               load_kwargs=dict(trust_remote_code=True, languages=["Python"],
-                                                licenses=["mit", "apache-2.0", "bsd-3-clause"]),
-                               license="permissive OSS (filtered)", gain="high",
-                               note="Ungated code alternative to The Stack; script-based loader -> downloads "
-                                    "through the mirror like medal does."),
+    "codeparrot_python":  dict(kind="hf_lines", repo="codeparrot/codeparrot-clean",
+                               files=["file-000000000001.json.gz"], fields=["content"],
+                               license="permissive OSS (per-file)", gain="high",
+                               note="Python source (CodeParrot-clean, dedup). Ungated; JSONL.gz at repo root, "
+                                    "column=content, fetched via hf_lines (/resolve/ gzip line-stream) — the "
+                                    "only mechanism that works mirror-only. 54 shards file-0000000000NN.json.gz "
+                                    "(~240MB each); add more to `files` for more data. Replaces the dead "
+                                    "bigcode/the-stack (gated 403) and codeparrot/github-code (load_dataset "
+                                    "hits huggingface.co/api/tree)."),
     # --- NIH direct FTP (no HF): PMC Open Access commercial-use full text ---
     "pmc_oa":             dict(kind="url_tar_text",
                                url="https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/txt/"
                                    "oa_comm_txt.PMC000xxxxxx.baseline.2024-12-18.tar.gz",
                                license="CC0/CC-BY (PMC OA commercial-use)", gain="high",
-                               note="PMC OA full-text (more homogeneous than medal abstracts). VERIFY the "
-                                    "current filename on your cluster (WebFetch can't list NIH FTP): "
-                                    "curl -s https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/txt/ | "
-                                    "grep -o 'oa_comm_txt[^\"]*baseline[^\"]*tar.gz' | head -1 ; then paste it "
-                                    "into url. If NIH FTP is blocked on your (China) cluster, tell me and I'll "
-                                    "switch PMC to an HF-mirror parquet source."),
+                               note="DEAD-END mirror-only (kept for record): NIH FTP host is reachable but "
+                                    "directory autoindex is OFF (can't discover the dated tarball name), and "
+                                    "the HF pmc/open_access datasets are script-only (fetch from NIH at load -> "
+                                    "load_dataset dies on the mirror). To use: obtain the exact current tarball "
+                                    "name on a networked machine and paste it into url. Otherwise keep `medal` "
+                                    "for medical, or invest in MIMIC-IV-Note (credentialed, homogeneous -> big delta)."),
 }
 
 
