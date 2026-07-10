@@ -4,7 +4,10 @@
 Only license-clean, verified-downloadable datasets.  Direct-URL / GitHub sources need
 no Hugging Face; HF sources work through hf-mirror.  Datasets whose loading *script*
 hardcodes huggingface.co URLs (pile-of-law, edgar) are fetched straight from the mirror
-as ``.jsonl(.xz)`` via the ``hf_lines`` handler.  Run from the repo root.
+as ``.jsonl(.xz)`` via the ``hf_lines`` handler; parquet-native datasets (earnings, the
+stack) are fetched as ``.parquet`` straight from the mirror via the ``hf_parquet`` handler
+— both bypass ``load_dataset``'s repo-tree listing, which hits huggingface.co and fails in
+a mirror-only env.  Run from the repo root.
 
     python scripts/download_text.py --list
     python scripts/download_text.py --dataset enwik9 --limit 20MB
@@ -75,6 +78,38 @@ DATASETS = {
                                fields=["title", "abstract", "claims", "background", "description"],
                                streaming=False, load_kwargs=dict(trust_remote_code=True, uniform_split=True),
                                license="CC-BY 4.0 (USPTO)", gain="high"),
+    # --- HF parquet straight-from-mirror (/resolve/ direct file; no load_dataset) ---
+    "earnings_calls":     dict(kind="hf_parquet", repo="kurry/sp500_earnings_transcripts",
+                               files=["parquet_files/part-0.parquet"], fields=None,
+                               license="MIT (dataset)", gain="high",
+                               note="S&P500 earnings-call transcripts (high delta: ritualized format). "
+                                    "Single ~1.8GB parquet — downloads fully then byte-caps; fields=None "
+                                    "auto-picks the transcript column."),
+    "the_stack_python":   dict(kind="hf_parquet", repo="bigcode/the-stack", revision="main",
+                               files=["data/python/train-00000-of-00206.parquet"], fields=["content"],
+                               license="permissive OSS (per-file MIT/Apache/BSD)", gain="high",
+                               note="GATED: accept terms at hf.co/datasets/bigcode/the-stack AND export a "
+                                    "HF_TOKEN that has accepted them; the mirror may not proxy gated files. "
+                                    "Test this first; if it 401/403s, use github_code_python instead. Add more "
+                                    "of the 206 shards to `files` for more data."),
+    "github_code_python": dict(kind="hf", hf_id="codeparrot/github-code", config=None, split="train",
+                               fields=["code"], streaming=True,
+                               load_kwargs=dict(trust_remote_code=True, languages=["Python"],
+                                                licenses=["mit", "apache-2.0", "bsd-3-clause"]),
+                               license="permissive OSS (filtered)", gain="high",
+                               note="Ungated code alternative to The Stack; script-based loader -> downloads "
+                                    "through the mirror like medal does."),
+    # --- NIH direct FTP (no HF): PMC Open Access commercial-use full text ---
+    "pmc_oa":             dict(kind="url_tar_text",
+                               url="https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/txt/"
+                                   "oa_comm_txt.PMC000xxxxxx.baseline.2024-12-18.tar.gz",
+                               license="CC0/CC-BY (PMC OA commercial-use)", gain="high",
+                               note="PMC OA full-text (more homogeneous than medal abstracts). VERIFY the "
+                                    "current filename on your cluster (WebFetch can't list NIH FTP): "
+                                    "curl -s https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/txt/ | "
+                                    "grep -o 'oa_comm_txt[^\"]*baseline[^\"]*tar.gz' | head -1 ; then paste it "
+                                    "into url. If NIH FTP is blocked on your (China) cluster, tell me and I'll "
+                                    "switch PMC to an HF-mirror parquet source."),
 }
 
 
@@ -200,6 +235,53 @@ def dl_hf_lines(key, spec, out, limit):
         raise RuntimeError("got 0 docs — the mirror data-file URL was unreachable")
 
 
+def dl_hf_parquet(key, spec, out, limit):
+    """Fetch parquet data file(s) straight from the mirror's ``/resolve/`` path and shard a
+    text column up to ``limit`` bytes.  Direct file URL (no ``/api`` repo-tree listing), so
+    it works on mirror-only clusters where ``load_dataset(streaming=True)`` fails (see the
+    dl_hf caveat).  ``fields`` selects the text column(s); if None, the single largest
+    string column is auto-picked (the transcript / code body)."""
+    import pandas as pd
+    endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+    rev = spec.get("revision", "main")
+    out.mkdir(parents=True, exist_ok=True)
+    if load_progress(out).get("bytes", 0) >= limit:
+        print(f"  [{key}] already {human_bytes(load_progress(out)['bytes'])} (>= limit)"); return
+
+    # fresh parse each run (a byte cap makes re-running to extend cheap)
+    for p in out.glob("part-*.txt"):
+        p.unlink()
+    (out / "manifest.jsonl").unlink(missing_ok=True)
+    save_progress(out, rows=0, bytes=0, shard=0)
+
+    sh = Sharder(out, key)
+    tmp = out / "_part.parquet"
+    for rel in spec["files"]:
+        if sh.bytes >= limit:
+            break
+        url = f"{endpoint}/datasets/{spec['repo']}/resolve/{rev}/{rel}"
+        print(f"  [{key}] {url}")
+        http_download(url, tmp, desc=Path(rel).name)
+        df = pd.read_parquet(tmp)
+        fields = spec.get("fields")
+        if not fields:                                  # auto-pick the largest text column
+            str_cols = [c for c in df.columns if df[c].dtype == object]
+            fields = ([max(str_cols, key=lambda c: int(df[c].astype(str).str.len().sum()))]
+                      if str_cols else [])
+        for row in df.to_dict("records"):
+            t = _row_text(row, fields)
+            if t:
+                sh.add(t, source=spec["repo"], config=key)
+            if sh.bytes >= limit:
+                break
+        tmp.unlink(missing_ok=True)
+    sh.close(source=spec["repo"], gain=spec.get("gain"))
+    print(f"  [{key}] -> {out}  ({human_bytes(sh.bytes)}, {sh.rows} docs)")
+    if sh.bytes == 0:
+        raise RuntimeError("got 0 docs — parquet URL unreachable (gated? need HF_TOKEN) "
+                           "or the picked column had no text")
+
+
 def dl_url_zip(key, spec, out, limit):
     """Download a .zip and keep the first ``limit`` bytes of one member as part-00000.txt."""
     out.mkdir(parents=True, exist_ok=True)
@@ -274,9 +356,9 @@ def dl_url_tar_text(key, spec, out, limit):
     print(f"  [{key}] -> {out}  ({human_bytes(sh.bytes)}, {sh.rows} files)")
 
 
-HANDLERS = {"hf": dl_hf, "hf_lines": dl_hf_lines, "url_zip": dl_url_zip,
-            "github_members": dl_github_members, "github_logs": dl_github_logs,
-            "url_tar_text": dl_url_tar_text}
+HANDLERS = {"hf": dl_hf, "hf_lines": dl_hf_lines, "hf_parquet": dl_hf_parquet,
+            "url_zip": dl_url_zip, "github_members": dl_github_members,
+            "github_logs": dl_github_logs, "url_tar_text": dl_url_tar_text}
 
 
 def main() -> int:
