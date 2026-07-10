@@ -4,10 +4,10 @@
 Only license-clean, verified-downloadable datasets.  Direct-URL / GitHub sources need
 no Hugging Face; HF sources work through hf-mirror.  Datasets whose loading *script*
 hardcodes huggingface.co URLs (pile-of-law, edgar) are fetched straight from the mirror
-as ``.jsonl(.xz)`` via the ``hf_lines`` handler; parquet-native datasets (earnings, the
-stack) are fetched as ``.parquet`` straight from the mirror via the ``hf_parquet`` handler
-— both bypass ``load_dataset``'s repo-tree listing, which hits huggingface.co and fails in
-a mirror-only env.  Run from the repo root.
+as ``.jsonl(.xz)`` via the ``hf_lines`` handler; tabular datasets (earnings parquet,
+clinical-note CSVs) are fetched as ``.parquet`` / ``.csv`` straight from the mirror via the
+``hf_table`` handler — both bypass ``load_dataset``'s repo-tree listing, which hits
+huggingface.co and fails in a mirror-only env.  Run from the repo root.
 
     python scripts/download_text.py --list
     python scripts/download_text.py --dataset enwik9 --limit 20MB
@@ -78,13 +78,26 @@ DATASETS = {
                                fields=["title", "abstract", "claims", "background", "description"],
                                streaming=False, load_kwargs=dict(trust_remote_code=True, uniform_split=True),
                                license="CC-BY 4.0 (USPTO)", gain="high"),
-    # --- HF parquet straight-from-mirror (/resolve/ direct file; no load_dataset) ---
-    "earnings_calls":     dict(kind="hf_parquet", repo="kurry/sp500_earnings_transcripts",
+    # --- HF table (parquet/csv) straight-from-mirror (/resolve/ direct file; no load_dataset) ---
+    "earnings_calls":     dict(kind="hf_table", repo="kurry/sp500_earnings_transcripts",
                                files=["parquet_files/part-0.parquet"], fields=None,
                                license="MIT (dataset)", gain="high",
                                note="S&P500 earnings-call transcripts (high delta: ritualized format). "
                                     "Single ~1.8GB parquet — downloads fully then byte-caps; fields=None "
                                     "auto-picks the transcript column."),
+    "pmc_patients":       dict(kind="hf_table", repo="zhengyun21/PMC-Patients",
+                               files=["PMC-Patients.csv"], fields=["patient"],
+                               license="CC-BY-NC-SA 4.0 (non-commercial)", gain="high",
+                               note="REAL patient case reports from PMC (NeurIPS'23 D&B). ~167k summaries, "
+                                    "homogeneous clinical narrative -> far bigger delta than medal's "
+                                    "heterogeneous abstracts. Column=patient. Ungated CSV via /resolve/. "
+                                    "RECOMMENDED medical replacement for medal."),
+    "asclepius_notes":    dict(kind="hf_table", repo="starmpcc/Asclepius-Synthetic-Clinical-Notes",
+                               files=["synthetic.csv"], fields=["note"],
+                               license="CC-BY-NC-SA 4.0 (non-commercial)", gain="high",
+                               note="157k SYNTHETIC discharge summaries (GPT-3.5 from PMC-Patients). Most "
+                                    "templated -> likely the biggest delta, but synthetic (representativeness "
+                                    "caveat). Column=note. Alternative to pmc_patients."),
     "codeparrot_python":  dict(kind="hf_lines", repo="codeparrot/codeparrot-clean",
                                files=["file-000000000001.json.gz"], fields=["content"],
                                license="permissive OSS (per-file)", gain="high",
@@ -230,13 +243,14 @@ def dl_hf_lines(key, spec, out, limit):
         raise RuntimeError("got 0 docs — the mirror data-file URL was unreachable")
 
 
-def dl_hf_parquet(key, spec, out, limit):
-    """Fetch parquet data file(s) straight from the mirror's ``/resolve/`` path and shard a
-    text column up to ``limit`` bytes.  Direct file URL (no ``/api`` repo-tree listing), so
-    it works on mirror-only clusters where ``load_dataset(streaming=True)`` fails (see the
-    dl_hf caveat).  ``fields`` selects the text column(s); if None, the single largest
-    string column is auto-picked (the transcript / code body)."""
-    import pandas as pd
+def dl_hf_table(key, spec, out, limit):
+    """Fetch tabular data file(s) (.parquet or .csv) straight from the mirror's
+    ``/resolve/`` path and shard a text column up to ``limit`` bytes.  Direct file URL (no
+    ``/api`` repo-tree listing), so it works on mirror-only clusters where
+    ``load_dataset(streaming=True)`` fails (see the dl_hf caveat).  Rows are streamed in
+    batches (parquet row-batches / csv chunks) so a large file is neither loaded whole into
+    RAM nor scanned past the byte cap.  ``fields`` selects the text column(s); if None, the
+    largest string column of the first batch is auto-picked."""
     endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
     rev = spec.get("revision", "main")
     out.mkdir(parents=True, exist_ok=True)
@@ -250,30 +264,40 @@ def dl_hf_parquet(key, spec, out, limit):
     save_progress(out, rows=0, bytes=0, shard=0)
 
     sh = Sharder(out, key)
-    tmp = out / "_part.parquet"
+    fields = spec.get("fields")
     for rel in spec["files"]:
         if sh.bytes >= limit:
             break
         url = f"{endpoint}/datasets/{spec['repo']}/resolve/{rev}/{rel}"
+        tmp = out / ("_table" + Path(rel).suffix)
         print(f"  [{key}] {url}")
         http_download(url, tmp, desc=Path(rel).name)
-        df = pd.read_parquet(tmp)
-        fields = spec.get("fields")
-        if not fields:                                  # auto-pick the largest text column
-            str_cols = [c for c in df.columns if df[c].dtype == object]
-            fields = ([max(str_cols, key=lambda c: int(df[c].astype(str).str.len().sum()))]
-                      if str_cols else [])
-        for row in df.to_dict("records"):
-            t = _row_text(row, fields)
-            if t:
-                sh.add(t, source=spec["repo"], config=key)
-            if sh.bytes >= limit:
+        if rel.lower().endswith(".csv"):
+            import pandas as pd
+            batches = (chunk.to_dict("records")
+                       for chunk in pd.read_csv(tmp, chunksize=2000, dtype=str, keep_default_na=False))
+        else:                                            # parquet, streamed by row-batch
+            import pyarrow.parquet as pq
+            batches = (b.to_pylist() for b in pq.ParquetFile(tmp).iter_batches(batch_size=2000))
+        done = False
+        for rows in batches:
+            if not fields and rows:                      # auto-pick the largest text column
+                cols = {k for r in rows for k, v in r.items() if isinstance(v, str)}
+                fields = ([max(cols, key=lambda c: sum(len(str(r.get(c, ""))) for r in rows))]
+                          if cols else [])
+            for row in rows:
+                t = _row_text(row, fields)
+                if t:
+                    sh.add(t, source=spec["repo"], config=key)
+                if sh.bytes >= limit:
+                    done = True; break
+            if done:
                 break
         tmp.unlink(missing_ok=True)
     sh.close(source=spec["repo"], gain=spec.get("gain"))
     print(f"  [{key}] -> {out}  ({human_bytes(sh.bytes)}, {sh.rows} docs)")
     if sh.bytes == 0:
-        raise RuntimeError("got 0 docs — parquet URL unreachable (gated? need HF_TOKEN) "
+        raise RuntimeError("got 0 docs — file URL unreachable (gated? need HF_TOKEN) "
                            "or the picked column had no text")
 
 
@@ -351,7 +375,7 @@ def dl_url_tar_text(key, spec, out, limit):
     print(f"  [{key}] -> {out}  ({human_bytes(sh.bytes)}, {sh.rows} files)")
 
 
-HANDLERS = {"hf": dl_hf, "hf_lines": dl_hf_lines, "hf_parquet": dl_hf_parquet,
+HANDLERS = {"hf": dl_hf, "hf_lines": dl_hf_lines, "hf_table": dl_hf_table,
             "url_zip": dl_url_zip, "github_members": dl_github_members,
             "github_logs": dl_github_logs, "url_tar_text": dl_url_tar_text}
 
