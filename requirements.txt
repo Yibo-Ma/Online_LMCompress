@@ -29,3 +29,4 @@ samplings             # required by bgpt/utils.py
 # stdlib/pillow/soundfile already above.  cjxl / ofr / cmix are external binaries (see the
 # script's INSTALL_HINT), not pip.
 brotli                # brotli text baseline (else the script uses the brotli CLI)
+pillow-jxl-plugin     # JPEG-XL image baseline via Pillow (else the script uses the cjxl CLI)

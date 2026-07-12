@@ -121,16 +121,33 @@ def _webp(im):
 
 
 def _jpegxl(im):
-    buf = io.BytesIO(); im.save(buf, format="PNG")     # cjxl reads PNG; -d 0 = mathematically lossless
-    return _cli_size("cjxl", ["cjxl", "@in", "@out", "-d", "0", "-e", "9"], buf.getvalue(), ".png", ".jxl")
+    """Lossless JPEG-XL.  Prefer the Pillow plugin (pure-pip, in-memory, no binary on PATH);
+    fall back to the `cjxl` CLI on a PNG if the plugin isn't installed."""
+    try:
+        import pillow_jxl  # noqa: F401  — pip install pillow-jxl-plugin; registers JXL with Pillow
+        buf = io.BytesIO(); im.save(buf, format="JXL", lossless=True, effort=9); return buf.tell()
+    except ImportError:
+        buf = io.BytesIO(); im.save(buf, format="PNG")     # cjxl reads PNG; -d 0 = mathematically lossless
+        return _cli_size("cjxl", ["cjxl", "@in", "@out", "-d", "0", "-e", "9"], buf.getvalue(), ".png", ".jxl")
 
 
 def _flac(wav):
-    """FLAC of the exact 8 kHz / 8-bit mono PCM (pure-Python via soundfile; fair 8-bit)."""
-    import numpy as np
+    """FLAC of the exact 8 kHz / 8-bit mono PCM (pure-Python via soundfile; fair 8-bit).
+
+    Read the WAV back as float (soundfile handles the header and normalises the 8-bit
+    levels to [-1, 1)); then re-encode at 8-bit FLAC (subtype PCM_S8) to a REAL temp file.
+    Two footguns avoided: (a) don't hand a small-magnitude int array to sf.write —
+    libsndfile rescales integer input by its full dtype range and would zero the signal;
+    (b) don't write FLAC to a BytesIO — libsndfile's FLAC encoder must seek back to
+    finalise the STREAMINFO header, which virtual (in-memory) IO can't do, silently
+    yielding an 18-byte empty stream.
+    """
     import soundfile as sf
-    pcm = np.frombuffer(wav[_WAV_HEADER_BYTES:], dtype=np.uint8).astype(np.int16) - 128
-    buf = io.BytesIO(); sf.write(buf, pcm, 8000, format="FLAC", subtype="PCM_S8"); return buf.tell()
+    data, sr = sf.read(io.BytesIO(wav), dtype="float32")
+    with TemporaryDirectory() as d:
+        p = os.path.join(d, "a.flac")
+        sf.write(p, data, sr, format="FLAC", subtype="PCM_S8")
+        return os.path.getsize(p)
 
 
 def _optimfrog(wav):
@@ -206,13 +223,18 @@ def _run(modality, payloads, content_units):
     print("  " + "-" * 43)
     results = []
     for name, fn in CODECS[modality]:
-        comp, ok = 0, True
-        for item in payloads:
-            s = fn(item)
-            if s is None:
-                ok = False
-                break
-            comp += s
+        try:
+            comp, ok = 0, True
+            for item in payloads:
+                s = fn(item)
+                if s is None:
+                    ok = False
+                    break
+                comp += s
+        except Exception as e:                       # one broken codec must not kill the rest
+            print(f"  {name:<12}{'error':>13}   ({type(e).__name__}: {e})")
+            results.append({"codec": name, "status": "error", "error": f"{type(e).__name__}: {e}"})
+            continue
         if not ok or content_units == 0:
             print(f"  {name:<12}{'skipped':>13}   ({INSTALL_HINT.get(name, 'unavailable')})")
             results.append({"codec": name, "status": "skipped"})
