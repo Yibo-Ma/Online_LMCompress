@@ -211,8 +211,13 @@ def main() -> int:
             continue
         out_root = NORM_ROOT / tag
         out_root.mkdir(parents=True, exist_ok=True)
-        index = [normalize_dataset(k, tok, tag, args.max_bytes, args.force)
-                 for k in keys if (RAW_ROOT / k).is_dir()]
+        index = []
+        for k in keys:
+            if not (RAW_ROOT / k).is_dir():
+                print(f"    [{k}] no raw data at {RAW_ROOT / k} — download it first "
+                      f"(python scripts/download_text.py --dataset {k}); skipped")
+                continue
+            index.append(normalize_dataset(k, tok, tag, args.max_bytes, args.force))
         (out_root / "normalize_summary.jsonl").write_text(
             "\n".join(json.dumps(s, ensure_ascii=False) for s in index), encoding="utf-8")
         touched = [s["dataset"] for s in index if s.get("char_changes", {}).get("changed")]

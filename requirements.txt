@@ -24,3 +24,8 @@ pydub                 # audio chunking
 soundfile             # audio decoding (no ffmpeg needed)
 pandas                # parquet audio datasets
 samplings             # required by bgpt/utils.py
+
+# Traditional baselines (evaluation/traditional_baselines.py); gzip/lzma2/png/webp/flac are
+# stdlib/pillow/soundfile already above.  cjxl / ofr / cmix are external binaries (see the
+# script's INSTALL_HINT), not pip.
+brotli                # brotli text baseline (else the script uses the brotli CLI)
