@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import List
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
 from peft import get_peft_model, LoraConfig, TaskType
 
 from compression.base_compressor import BaseCompressor
@@ -24,7 +24,7 @@ from compression.types import CompressedData
 from compression.online.backends.base import ChunkUnit, OnlineBackend
 from compression.online.config import OnlineLearningConfig
 from utils.determinism import set_seed
-from utils.text_utils import pad_token_ids
+from utils.text_utils import load_lm_tokenizer, pad_token_ids
 
 
 class _LLMTokenBackend(OnlineBackend):
@@ -40,7 +40,7 @@ class _LLMTokenBackend(OnlineBackend):
     # ------------------------------------------------------------------
 
     def load_backbone(self) -> None:
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, use_fast=False)
+        self.tokenizer = load_lm_tokenizer(self.model_path)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = (

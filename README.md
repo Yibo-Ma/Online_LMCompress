@@ -127,6 +127,20 @@ python evaluation/eval_online.py --modality image --mode both --data data/image/
 
 # audio — concatenate several clips; each clip is chunked then the lists are concatenated
 python evaluation/eval_online.py --modality audio --mode both --data data/audio/librispeech --audio-clips 8 --chunk-ms 1000
+
+# text on another model family (ablation) — download, normalize for its tokenizer, then eval.
+# smollm2-* is ungated, so hf-mirror serves it directly:
+python scripts/download_models.py --model smollm2-1.7b
+python scripts/normalize_text.py --models checkpoints/SmolLM2-1.7B
+python evaluation/eval_online.py --modality text --mode both --model checkpoints/SmolLM2-1.7B \
+    --data data/text/normalized/smollm2-1.7b/pile_of_law_eurlex
+
+# llama-3.2-1b is GATED on Hugging Face. On hf.co: accept the license + set HF_TOKEN.
+# In a mirror-only (hf.co-blocked) environment, fetch it token-free from ModelScope:
+python scripts/download_models.py --model llama-3.2-1b --source modelscope   # pip install modelscope
+python scripts/normalize_text.py --models checkpoints/Llama-3.2-1B
+python evaluation/eval_online.py --modality text --mode both --model checkpoints/Llama-3.2-1B \
+    --data data/text/normalized/llama-3.2-1b/pile_of_law_eurlex
 ```
 
 Each run prints a comparison table with `bpb` (bits per coded byte) and a content-relative

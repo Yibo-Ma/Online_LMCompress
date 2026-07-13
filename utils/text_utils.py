@@ -63,6 +63,27 @@ def chunk_words(text: str, chunk_size: int, chunk_overlap: int = 0) -> List[str]
 
 
 # ---------------------------------------------------------------------------
+# Tokenizer loading
+# ---------------------------------------------------------------------------
+
+def load_lm_tokenizer(model_path: str):
+    """Load a tokenizer, preferring the slow implementation.
+
+    Slow-first keeps behavior bit-identical with the team's existing Qwen runs
+    and archives.  Families that ship only a fast ``tokenizer.json`` (Llama 3,
+    SmolLM2) raise on ``use_fast=False``; fall back to the fast tokenizer, which
+    is equally deterministic.  What losslessness actually requires is that
+    normalize_text and compress/decompress all use the SAME implementation for a
+    given model — guaranteed by sharing this helper.
+    """
+    from transformers import AutoTokenizer
+    try:
+        return AutoTokenizer.from_pretrained(model_path, use_fast=False)
+    except Exception:
+        return AutoTokenizer.from_pretrained(model_path, use_fast=True)
+
+
+# ---------------------------------------------------------------------------
 # Loader registry
 # ---------------------------------------------------------------------------
 

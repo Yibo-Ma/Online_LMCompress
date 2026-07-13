@@ -18,6 +18,10 @@ peft
 constriction          # range coder backend
 tqdm
 
+# Optional: only for `download_models.py --source modelscope`, the token-free route to
+# gated HF repos (e.g. Llama) from a mirror-only / China network. Not needed otherwise.
+# modelscope
+
 # Modality I/O
 pillow                # image (PIL)
 pydub                 # audio chunking

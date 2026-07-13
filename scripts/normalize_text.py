@@ -23,6 +23,7 @@ Run from the repo root:
     python scripts/normalize_text.py                                   # all datasets, both tokenizers
     python scripts/normalize_text.py --dataset pile_of_law_eurlex medal
     python scripts/normalize_text.py --models checkpoints/Qwen3-1.7B-Base --force
+    python scripts/normalize_text.py --models checkpoints/Llama-3.2-1B checkpoints/SmolLM2-1.7B
 """
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root: utils.*
 
 from _common import DATA_ROOT, human_bytes  # noqa: E402
 
@@ -199,12 +201,14 @@ def main() -> int:
     if not keys:
         print(f"No datasets under {RAW_ROOT}."); return 1
 
-    from transformers import AutoTokenizer
+    # Same loader as the compressor backend (slow-first, fast fallback), so the
+    # normalized copy is a fixed point of the exact tokenizer eval_online will use.
+    from utils.text_utils import load_lm_tokenizer
     for model in args.models:
         tag = tokenizer_tag(model)
         print(f"\n=== tokenizer '{tag}'  ({model}) ===")
         try:
-            tok = AutoTokenizer.from_pretrained(model, use_fast=False)
+            tok = load_lm_tokenizer(model)
         except Exception as e:
             print(f"  could not load tokenizer {model}: {type(e).__name__}: {e}")
             print(f"  (download it first: python scripts/download_models.py --model <key>)")

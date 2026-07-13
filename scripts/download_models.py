@@ -8,6 +8,7 @@ Examples
     python scripts/download_models.py --model qwen3-1.7b
     python scripts/download_models.py --model qwen2.5-0.5b qwen2.5-7b qwen3-1.7b qwen3-4b qwen3-8b bgpt
     python scripts/download_models.py --model qwen3-1.7b --fast   # aria2c multi-connection (fastest)
+    python scripts/download_models.py --model llama-3.2-1b --source modelscope   # gated on hf; token-free here
     python scripts/download_models.py --all
     python scripts/download_models.py --list
 
@@ -16,8 +17,12 @@ Endpoint handling
 By default it tries **hf-mirror.com first and falls back to huggingface.co** (so it
 works whether you are behind the Great Firewall *or* on a network where the mirror
 only redirects). Force one with ``--no-mirror`` (hf.co only) or ``--hf-endpoint URL``.
-Downloads are resumable, so an interrupted pull continues. If both endpoints fail
-(fully offline / blocked), use ModelScope — see the tip printed on failure.
+Downloads are resumable, so an interrupted pull continues.
+
+For **gated** HF repos (e.g. Llama) in a mirror-only environment, hf-mirror cannot
+serve the files without routing your HF token through it; pass ``--source modelscope``
+instead to fetch the model's ``ms_repo`` from ModelScope token-free (needs
+``pip install modelscope``).
 """
 from __future__ import annotations
 
@@ -46,6 +51,16 @@ MODELS = {
         source="hf_files", repo="sander-wood/bgpt", dir="bgpt",
         files=["weights-image.pth", "weights-audio.pth", "weights-text.pth"],
         note="if your team uses custom bGPT checkpoints, drop them in checkpoints/bgpt/"),
+    # Model-family ablation (text).  SmolLM2 is ungated Apache-2.0, so hf-mirror serves it
+    # directly in a mirror-only (China) environment; the 135M size is a fast pipeline smoke
+    # test.  Llama is GATED — see the note: in a mirror-only environment prefer ModelScope
+    # (China-native, token-free) over routing HF_TOKEN through a third-party mirror.
+    "llama-3.2-1b": dict(source="hf_repo", repo="meta-llama/Llama-3.2-1B",   dir="Llama-3.2-1B",
+                         ms_repo="LLM-Research/Llama-3.2-1B",
+                         note="gated. hf.co: accept the license + set HF_TOKEN. mirror-only "
+                              "(hf.co blocked): use --source modelscope (China-native, no token)"),
+    "smollm2-1.7b": dict(source="hf_repo", repo="HuggingFaceTB/SmolLM2-1.7B", dir="SmolLM2-1.7B"),
+    "smollm2-135m": dict(source="hf_repo", repo="HuggingFaceTB/SmolLM2-135M", dir="SmolLM2-135M"),
 }
 
 
@@ -76,14 +91,31 @@ def download_files(spec: dict, endpoint: str) -> None:
                         local_dir=str(dest), endpoint=endpoint)
 
 
+def download_modelscope(spec: dict) -> None:
+    """Download a model from ModelScope (Alibaba) instead of Hugging Face.
+
+    The escape hatch for gated HF repos (e.g. Llama) in a mirror-only environment:
+    ModelScope is reachable inside China without the GFW and serves these weights
+    token-free, so no HF credential ever transits the third-party hf-mirror.  Needs
+    ``pip install modelscope`` and a ``ms_repo`` id in the catalog entry.  Same
+    ignore set as the HF path so the two produce an equivalent ``checkpoints/<dir>``.
+    """
+    from modelscope import snapshot_download
+    snapshot_download(
+        spec["ms_repo"], local_dir=str(CKPT_ROOT / spec["dir"]),
+        ignore_patterns=["*.pth", "*.msgpack", "*.h5", "original/*"],
+    )
+
+
 def _aria2_get(url: str, dest) -> None:
     """Download one file with aria2c: multi-connection, resumable (-c)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["aria2c", "-x16", "-s16", "-k1M", "-c", "--auto-file-renaming=false",
-         "--console-log-level=warn", "-d", str(dest.parent), "-o", dest.name, url],
-        check=True,
-    )
+    cmd = ["aria2c", "-x16", "-s16", "-k1M", "-c", "--auto-file-renaming=false",
+           "--console-log-level=warn", "-d", str(dest.parent), "-o", dest.name]
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if token:                                    # gated repos (e.g. Llama) need auth on hf.co
+        cmd += ["--header", f"Authorization: Bearer {token}"]
+    subprocess.run([*cmd, url], check=True)
 
 
 def _repo_files(spec: dict, endpoint: str) -> list[str]:
@@ -105,7 +137,28 @@ def download_aria2(spec: dict, endpoint: str) -> None:
         _aria2_get(f"{endpoint}/{spec['repo']}/resolve/main/{f}", dest / f)
 
 
-def fetch_model(name: str, spec: dict, endpoints: list[str], fast: bool = False) -> bool:
+def fetch_model(name: str, spec: dict, endpoints: list[str],
+                fast: bool = False, source: str = "hf") -> bool:
+    if source == "modelscope":
+        ms_repo = spec.get("ms_repo")
+        if not ms_repo:
+            print(f"  [{name}] no ModelScope mirror in the catalog (no ms_repo); "
+                  f"omit --source modelscope for this model, or add its ms_repo id")
+            return False
+        try:
+            print(f"  [{name}] {ms_repo} via ModelScope -> checkpoints/{spec['dir']}")
+            download_modelscope(spec)
+            print(f"  [{name}] done")
+            return True
+        except ImportError:
+            print(f"  [{name}] --source modelscope needs the package: pip install modelscope")
+            return False
+        except Exception as e:
+            print(f"  [{name}] FAILED via ModelScope: {type(e).__name__}: {str(e)[:120]}")
+            print(f"        some ModelScope repos require accepting terms once at "
+                  f"modelscope.cn/models/{ms_repo}")
+            return False
+
     use_aria = fast and shutil.which("aria2c") is not None
     if fast and not use_aria:
         print(f"  [{name}] --fast needs aria2c on PATH (conda install -c conda-forge aria2); "
@@ -148,6 +201,10 @@ def main() -> int:
     p.add_argument("--hf-endpoint", default=None, help="force a single endpoint URL")
     p.add_argument("--fast", action="store_true",
                    help="use aria2c multi-connection downloads (much faster; needs aria2c on PATH)")
+    p.add_argument("--source", choices=["hf", "modelscope"], default="hf",
+                   help="download host. 'modelscope' (needs `pip install modelscope`) fetches a "
+                        "model's ms_repo token-free — the route for gated HF repos (Llama) in a "
+                        "mirror-only environment where hf.co is blocked")
     args = p.parse_args()
 
     if args.list:
@@ -156,7 +213,10 @@ def main() -> int:
         return 0
 
     endpoints = _endpoints(args)
-    print(f"endpoints (in order): {endpoints}")
+    if args.source == "modelscope":
+        print("source: ModelScope (token-free; hf endpoints unused)")
+    else:
+        print(f"endpoints (in order): {endpoints}")
 
     keys = list(MODELS) if args.all else (args.model or [])
     if not keys:
@@ -167,7 +227,7 @@ def main() -> int:
         s = MODELS.get(k)
         if s is None:
             print(f"  [{k}] unknown model key — see --list"); ok = False; continue
-        ok = fetch_model(k, s, endpoints, args.fast) and ok
+        ok = fetch_model(k, s, endpoints, args.fast, args.source) and ok
     return 0 if ok else 1
 
 

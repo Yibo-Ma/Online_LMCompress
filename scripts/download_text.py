@@ -68,6 +68,13 @@ DATASETS = {
     "edgar_corpus":       dict(kind="hf_lines", repo="eloukas/edgar-corpus",
                                files=["2020/train.jsonl"], fields=None,
                                license="public (SEC)", gain="high"),
+    "beancounter":        dict(kind="hf_lines", repo="bradfordlevy/BeanCounter",
+                               files=["deduped/bc-001-of-220.jsonl.gz"], fields=["text"],
+                               license="ODC-By (SEC EDGAR)", gain="high",
+                               note="NeurIPS'24 D&B; SEC EDGAR business text 1996-2023 (deduped 111B config). "
+                                    ".jsonl.gz via hf_lines (/resolve/ gzip stream, byte-capped -> stops mid-shard; "
+                                    "one shard is ~300MB but --limit halts early). Column=text. More citable "
+                                    "finance corpus than edgar_corpus -> can be the finance main."),
     # --- HF via load_dataset (work through hf-mirror) ---
     "codesearchnet":      dict(kind="hf", hf_id="code_search_net", config="python",
                                split="train", fields=["whole_func_string"],
