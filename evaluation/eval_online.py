@@ -225,8 +225,9 @@ def _run_mode(mode: str, args, device, cfg: OnlineLearningConfig):
     def make_compressor():
         backend = _build_backend(args.modality, args.model, device, args)
         if mode == "static":
-            return StaticCompressor(backend, device, batch_chunks=args.batch_chunks)
-        return OnlineCompressor(backend, device, cfg)
+            return StaticCompressor(backend, device, batch_chunks=args.batch_chunks,
+                                    shuffle_seed=args.shuffle_seed)
+        return OnlineCompressor(backend, device, cfg, shuffle_seed=args.shuffle_seed)
 
     comp = make_compressor()
     comp.setup()
@@ -323,6 +324,12 @@ def _build_parser():
     p.add_argument("--base-seed", type=int, default=42)
     p.add_argument("--train-on-all", action="store_true",
                    help="train on all chunks seen so far (default: recent interval only)")
+    p.add_argument("--shuffle-seed", type=int, default=None,
+                   help="permute the chunk CODING order with this seed; the decoder inverts "
+                        "the permutation, so the round-trip stays lossless and zero side "
+                        "information is sent. Control experiment: gains that survive the "
+                        "shuffle are domain-level; gains that vanish came from stream "
+                        "locality. Default: natural order")
     p.add_argument("--image-px", type=int, default=32, help="image: spatial patch px")
     p.add_argument("--image-crop", type=int, default=0, help="image: crop to NxN (0=full)")
     p.add_argument("--image-count", type=int, default=1,

@@ -149,7 +149,9 @@ the number to report — plus the static→online delta and `round-trip: OK`.
 
 Key flags: `--train-interval`, `--epochs-per-train`, `--lora-r/--lora-alpha`, `--lr`,
 `--chunk-size` (text tokens/chunk), `--image-count`, `--audio-clips`, `--chunk-ms`,
-`--no-decompress` (compress-only).
+`--no-decompress` (compress-only), `--shuffle-seed` (permute the chunk *coding order*;
+the decoder inverts it, so the round-trip stays lossless with zero side information —
+the control experiment separating stream-locality gains from domain-level gains).
 
 > **Determinism.** Online losslessness is bit-fragile: the decoder must reproduce the
 > encoder's logits *and* its LoRA updates exactly. Compress and decompress must use the

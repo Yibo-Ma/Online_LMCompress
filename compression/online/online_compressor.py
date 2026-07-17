@@ -12,7 +12,7 @@ The partial trailing interval is coded but not trained (mirrored on both ends).
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -28,8 +28,9 @@ class OnlineCompressor(_ChunkedCompressor):
 
     def __init__(
         self, backend: OnlineBackend, device: torch.device, cfg: OnlineLearningConfig,
+        shuffle_seed: Optional[int] = None,
     ) -> None:
-        super().__init__(backend, device)
+        super().__init__(backend, device, shuffle_seed=shuffle_seed)
         self.cfg = cfg
         self.optimizer = None
         self.trainer = None
@@ -53,7 +54,7 @@ class OnlineCompressor(_ChunkedCompressor):
         )
 
     def compress(self, raw: Any, framing: bytes = b"") -> bytes:
-        chunks = [c for c in self.backend.to_chunks(raw) if c.token_ids]
+        chunks = self._prepare_chunks(raw)
         total_ob = self.backend.raw_size_bytes(raw)
 
         all_cds = []
@@ -67,10 +68,10 @@ class OnlineCompressor(_ChunkedCompressor):
                 self._train(train_chunks, phase)
                 phase += 1
 
-        return self._assemble_archive(self.ROLE, self._settings(), all_cds, total_ob, framing)
+        return self._assemble_archive(self.ROLE, all_cds, total_ob, framing)
 
     def decompress(self, archive_bytes: bytes) -> Any:
-        total_ob, framing, cds = self._open_archive(self.ROLE, self._settings(), archive_bytes)
+        total_ob, framing, cds = self._open_archive(self.ROLE, archive_bytes)
 
         decoded: List[ChunkUnit] = []
         seen: List[ChunkUnit] = []
@@ -84,4 +85,4 @@ class OnlineCompressor(_ChunkedCompressor):
                 self._train(train_chunks, phase)
                 phase += 1
 
-        return self._finalize(decoded, total_ob, framing)
+        return self._finalize(self._restore_order(decoded), total_ob, framing)
