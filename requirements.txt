@@ -34,3 +34,7 @@ samplings             # required by bgpt/utils.py
 # script's INSTALL_HINT), not pip.
 brotli                # brotli text baseline (else the script uses the brotli CLI)
 pillow-jxl-plugin     # JPEG-XL image baseline via Pillow (else the script uses the cjxl CLI)
+
+# Analysis / figures (evaluation/rate_curve.py). The tool always writes its tidy JSON;
+# matplotlib is only needed to render the PNG from it.
+matplotlib

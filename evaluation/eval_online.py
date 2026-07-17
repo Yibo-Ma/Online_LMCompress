@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from compression.online.config import OnlineLearningConfig
 from compression.online.static_compressor import StaticCompressor
 from compression.online.online_compressor import OnlineCompressor
+from utils import online_archive as ar
 from utils.determinism import ensure_deterministic, sync
 
 
@@ -122,10 +123,17 @@ def _load_raw(modality: str, path: str, args):
             if args.image_crop:
                 c = args.image_crop
                 img = img.crop((0, 0, min(c, img.width), min(c, img.height)))
+            patches, _meta = patchify_image(img, patch_size=args.image_px)
+            # --max-chunks caps the stream on WHOLE-image boundaries (never mid-image, so
+            # every prefix stays losslessly reconstructable): stop before an image that
+            # would exceed the budget, but always keep at least the first image. framing /
+            # subpixels / reference are all built from the kept images, so they stay exact.
+            if (args.max_chunks is not None and blobs
+                    and len(blobs) + len(patches) > args.max_chunks):
+                break
             subpixels += img.width * img.height * 3        # original content, before 32-grid padding
             sizes.append((img.width, img.height))
             reference.append(img.tobytes())                # pixel-level round-trip reference
-            patches, _meta = patchify_image(img, patch_size=args.image_px)
             blobs.extend(p.data for p in patches)
         framing = serialize_image_framing(args.image_px, sizes)
         return blobs, subpixels, framing, reference
@@ -230,6 +238,13 @@ def _run_mode(mode: str, args, device, cfg: OnlineLearningConfig):
     ratio = orig_bytes / max(comp_bytes, 1)
     bpb = comp_bytes * 8 / max(orig_bytes, 1)
     bpsp = comp_bytes * 8 / max(content_units, 1)
+
+    # Per-chunk record. The archive already stores every chunk's coded size, so
+    # recovering it here is free and lets analysis tools (evaluation/rate_curve.py)
+    # draw the prequential picture from --json alone, without re-running a model.
+    # Header/framing bytes belong to no chunk: sum(chunk_bits)/8 < comp_bytes.
+    _meta, _tob, _framing, chunk_lengths, payloads = ar.parse_archive(archive)
+    chunk_bits = [len(p) * 8 for p in payloads]
     mlabel = CONTENT_UNIT[args.modality][1]
     print(f"  compressed: {comp_bytes} bytes | ratio={ratio:.3f}x | "
           f"bpb={bpb:.4f} | {mlabel}={bpsp:.4f} | {comp_s:.2f}s")
@@ -259,7 +274,8 @@ def _run_mode(mode: str, args, device, cfg: OnlineLearningConfig):
         print("  (decompress skipped — compress-only)")
 
     return dict(mode=mode, orig=orig_bytes, comp=comp_bytes,
-                ratio=ratio, bpb=bpb, bpsp=bpsp, comp_s=comp_s, decomp_s=decomp_s)
+                ratio=ratio, bpb=bpb, bpsp=bpsp, comp_s=comp_s, decomp_s=decomp_s,
+                chunk_lengths=chunk_lengths, chunk_bits=chunk_bits)
 
 
 def _print_comparison(results, modality: str):
@@ -315,8 +331,9 @@ def _build_parser():
     p.add_argument("--audio-clips", type=int, default=1,
                    help="audio: # clips from a dataset to concatenate into one stream")
     p.add_argument("--max-chunks", type=int, default=None,
-                   help="audio: cap the stream to the first N chunks (scale WITHIN a long clip — "
-                        "a clean amortization axis that does not change data content)")
+                   help="cap the stream to the first N chunks — a clean amortization axis that does "
+                        "not change data content. audio: scales WITHIN a long clip; image: snaps DOWN "
+                        "to a whole-image boundary (never mid-image), keeping at least the first image")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no-decompress", action="store_true",
                    help="compress only (skip slow lossless verification)")
