@@ -145,7 +145,7 @@ class Run:
 
 
 def _default_tag(path: str) -> str:
-    """`runs/<id>/result.json` -> `<id>`; otherwise the file's own stem."""
+    """``runs/<id>/result.json`` -> ``<id>``; otherwise the file's own stem."""
     stem = os.path.splitext(os.path.basename(path))[0]
     if stem == "result":
         parent = os.path.basename(os.path.dirname(os.path.abspath(path)))

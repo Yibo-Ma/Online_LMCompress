@@ -1,9 +1,0 @@
-{
-  "created_at": "2026-07-07T22:15:06",
-  "git_commit": "c462805",
-  "modality": "image",
-  "group_name": "probe_imagepx_image",
-  "grid_file": "C:\\Users\\y439ma\\Desktop\\Research\\GIT\\Online_LMCompress\\experiments\\grids\\round4\\probe_imagepx.json",
-  "n_runs": 8,
-  "submit": "sbatch --array=0-7%16 experiments/run_array.sbatch results\\sweeps\\image\\20260707_221506_probe_imagepx_image"
-}

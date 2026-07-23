@@ -15,7 +15,7 @@ did not download at the end.  Restrict with e.g. ``--text-datasets enwik9 medal`
 
 Common flags (any phase): --dry-run, --pip, --no-mirror, --hf-endpoint, --keep-going.
 
-  models   qwen2.5-0.5b, qwen2.5-7b, qwen3-1.7b, qwen3-4b, qwen3-8b, bgpt  (~50 GB —
+  models   qwen2.5-0.5b, qwen2.5-7b, qwen3-0.6b, qwen3-1.7b, qwen3-4b, qwen3-8b, bgpt  (~50 GB —
            restrict with e.g. --models qwen2.5-0.5b qwen3-1.7b bgpt)
   text     enwik8/9, text8, silesia, loghub, enron, pile_of_law_eurlex,
            atticus_contracts, edgar_corpus, codesearchnet, medal, hupd
@@ -36,7 +36,7 @@ from _common import REPO_ROOT, DATA_ROOT, read_download_status  # noqa: E402
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 
-DEFAULT_MODELS = ["qwen2.5-0.5b", "qwen2.5-7b", "qwen3-1.7b", "qwen3-4b", "qwen3-8b", "bgpt"]
+DEFAULT_MODELS = ["qwen2.5-0.5b", "qwen2.5-7b", "qwen3-0.6b", "qwen3-1.7b", "qwen3-4b", "qwen3-8b", "bgpt"]
 DEFAULT_NORM_MODELS = ["checkpoints/Qwen2.5-0.5B", "checkpoints/Qwen3-1.7B-Base"]
 
 

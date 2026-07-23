@@ -15,3 +15,6 @@ compressed.bin
 tmp/
 temp_img
 submit_slurm.sh
+
+# results (sweeps, figures, curves — produced locally, synced out-of-band)
+/results/**

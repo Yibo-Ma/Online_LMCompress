@@ -1,5 +1,9 @@
 # Sweep runbook
 
+> **Role:** the end-to-end experiment recipe — which grids to run, in what order, and how
+> to read each result. For the `sweep.py` command reference see [README.md](README.md); for
+> the baseline/metric definitions the headline table uses see [BASELINES.md](BASELINES.md).
+
 Five stages, all driven by `sweep.py` (tool docs: `README.md`). Objective per run:
 **`online_rate`** (bpc text / bpsp image / bps audio), lower is better; `delta_pct`
 = static→online gain. Grids live in `grids/`, named by stage.

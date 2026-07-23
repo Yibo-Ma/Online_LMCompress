@@ -1,5 +1,9 @@
 # Sweep harness (SLURM job array)
 
+> **Role:** reference for the `sweep.py` tool. For the end-to-end experiment recipe
+> (which grids to run in what order) see [RUNBOOK.md](RUNBOOK.md); for project setup and
+> single runs see the [top-level README](../README.md).
+
 **One parameter combination = one JSON config = one array task = one process.**
 Each combo gets its own GPU and runs in parallel up to a `%K` cap — the efficient
 way to sweep on a cluster. (The online run is sequential *within* a stream, so
@@ -23,6 +27,9 @@ python experiments/sweep.py agg --group results/sweeps/text/<group>
 
 # 4. list every sweep you have run, with its best rate
 python experiments/sweep.py ls
+
+# 5. plot per-chunk rate curves from any finished runs (no GPU; see evaluation/rate_curve.py)
+python evaluation/rate_curve.py results/sweeps/text/<group>/runs/*/result.json --rolling 10
 ```
 
 `run_array.sbatch` just calls `sweep.py run --index $SLURM_ARRAY_TASK_ID`.

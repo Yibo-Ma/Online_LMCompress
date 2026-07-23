@@ -1,4 +1,8 @@
-# Baselines / 对比指标总清单（定稿）
+# Baselines & metric specification
+
+> **Role:** the single source of truth for every comparison number — which baselines to run,
+> how each rate/ratio is defined, and the exact commands. Consumed by the headline stage of
+> the [RUNBOOK](RUNBOOK.md). (Reference notes; kept in the authors' working language.)
 
 Source of truth for every comparison number in the paper. Aligned with the paper's
 positioning: **the main result is the controlled delta (online vs static, same model /

@@ -18,6 +18,13 @@ peft
 constriction          # range coder backend
 tqdm
 
+# Download / IO stack. These are pulled in transitively by datasets/huggingface_hub
+# today, but scripts/_common.py and scripts/download_text.py import them DIRECTLY, so
+# they are declared here to keep the pipeline robust to a leaner HF install.
+requests              # HTTP downloads with Range/retry (scripts/_common.py)
+pyarrow               # parquet-streamed text datasets (earnings_calls, pmc_patients, ...)
+psutil                # peak-RAM reporting in eval (utils/eval_utils.py; degrades silently if absent)
+
 # Optional: only for `download_models.py --source modelscope`, the token-free route to
 # gated HF repos (e.g. Llama) from a mirror-only / China network. Not needed otherwise.
 # modelscope
@@ -26,7 +33,7 @@ tqdm
 pillow                # image (PIL)
 pydub                 # audio chunking
 soundfile             # audio decoding (no ffmpeg needed)
-pandas                # parquet audio datasets
+pandas                # tabular dataset handling
 samplings             # required by bgpt/utils.py
 
 # Traditional baselines (evaluation/traditional_baselines.py); gzip/lzma2/png/webp/flac are
